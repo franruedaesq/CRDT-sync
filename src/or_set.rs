@@ -139,6 +139,25 @@ where
             }
         }
     }
+
+    /// Merge another OR-Set's state into this one (state-based / CvRDT).
+    ///
+    /// The merge computes the **union** of the two active-token maps: every
+    /// `(value, token)` pair that is live in either replica is live in the
+    /// result.  Tokens that have already been removed (their entry is absent or
+    /// the token set is empty) do not affect the other replica.
+    ///
+    /// - **Commutative**: `a.merge(&b)` and `b.merge(&a)` converge to the same
+    ///   set of elements.
+    /// - **Associative** and **idempotent** by the properties of set union.
+    pub fn merge(&mut self, other: &ORSet<T>) {
+        for (value, tokens) in &other.entries {
+            let entry = self.entries.entry(value.clone()).or_default();
+            for token in tokens {
+                entry.insert(token.clone());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -251,5 +270,115 @@ mod tests {
         v1.sort();
         v2.sort();
         assert_eq!(v1, v2);
+    }
+
+    // ── merge() tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_empty_into_non_empty_is_noop() {
+        let mut a: ORSet<i32> = ORSet::new("n1");
+        let op = a.add(42);
+        a.apply(op);
+        let b: ORSet<i32> = ORSet::new("n2");
+        a.merge(&b);
+        assert!(a.contains(&42));
+        assert_eq!(a.len(), 1);
+    }
+
+    #[test]
+    fn merge_non_empty_into_empty() {
+        let mut a: ORSet<i32> = ORSet::new("n1");
+        let mut b: ORSet<i32> = ORSet::new("n2");
+        let op = b.add(7);
+        b.apply(op);
+        a.merge(&b);
+        assert!(a.contains(&7));
+    }
+
+    #[test]
+    fn merge_is_commutative() {
+        let mut a: ORSet<i32> = ORSet::new("n1");
+        let mut b: ORSet<i32> = ORSet::new("n2");
+
+        let op_a = a.add(1);
+        a.apply(op_a);
+        let op_b = b.add(2);
+        b.apply(op_b);
+
+        let a2 = a.clone();
+        let mut b2 = b.clone();
+
+        a.merge(&b);   // a absorbs b
+        b2.merge(&a2); // b absorbs a
+
+        let mut va: Vec<i32> = a.iter().cloned().collect();
+        let mut vb: Vec<i32> = b2.iter().cloned().collect();
+        va.sort();
+        vb.sort();
+        assert_eq!(va, vb); // commutative: same elements
+    }
+
+    #[test]
+    fn merge_is_associative() {
+        let mut a: ORSet<i32> = ORSet::new("n1");
+        let mut b: ORSet<i32> = ORSet::new("n2");
+        let mut c: ORSet<i32> = ORSet::new("n3");
+
+        let op_a = a.add(1);
+        a.apply(op_a);
+        let op_b = b.add(2);
+        b.apply(op_b);
+        let op_c = c.add(3);
+        c.apply(op_c);
+
+        // (a merge b) merge c
+        let mut ab = a.clone();
+        ab.merge(&b);
+        let mut ab_c = ab.clone();
+        ab_c.merge(&c);
+
+        // a merge (b merge c)
+        let mut bc = b.clone();
+        bc.merge(&c);
+        let mut a_bc = a.clone();
+        a_bc.merge(&bc);
+
+        let mut v1: Vec<i32> = ab_c.iter().cloned().collect();
+        let mut v2: Vec<i32> = a_bc.iter().cloned().collect();
+        v1.sort();
+        v2.sort();
+        assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn merge_is_idempotent() {
+        let mut a: ORSet<i32> = ORSet::new("n1");
+        let op = a.add(5);
+        a.apply(op);
+        let snapshot = a.clone();
+        a.merge(&snapshot);
+        a.merge(&snapshot);
+        assert_eq!(a.len(), 1);
+        assert!(a.contains(&5));
+    }
+
+    #[test]
+    fn merge_unions_disjoint_sets() {
+        let mut a: ORSet<i32> = ORSet::new("n1");
+        let mut b: ORSet<i32> = ORSet::new("n2");
+
+        for i in 0..3 {
+            let op = a.add(i);
+            a.apply(op);
+        }
+        for i in 3..6 {
+            let op = b.add(i);
+            b.apply(op);
+        }
+
+        a.merge(&b);
+        let mut v: Vec<i32> = a.iter().cloned().collect();
+        v.sort();
+        assert_eq!(v, vec![0, 1, 2, 3, 4, 5]);
     }
 }

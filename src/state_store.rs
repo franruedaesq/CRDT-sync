@@ -79,6 +79,7 @@ type JsonORSet = ORSet<serde_json::Value>;
 type JsonRGA = RGA<serde_json::Value>;
 
 /// A multi-CRDT state synchronization engine.
+#[derive(Clone)]
 pub struct StateStore {
     node_id: String,
     clock: LamportClock,
@@ -292,6 +293,47 @@ impl StateStore {
             }
         }
     }
+
+    /// Merge another `StateStore`'s full state into this one (state-based / CvRDT).
+    ///
+    /// All registers, sets and sequences from `other` are merged into `self`
+    /// using the state-based merge of the underlying CRDT.  Keys present only
+    /// in `other` are adopted wholesale.  The Lamport clock is advanced to
+    /// reflect the merged state.
+    ///
+    /// - **Commutative**: `a.merge(&b)` and `b.merge(&a)` converge to the same
+    ///   composite state.
+    /// - **Associative** and **idempotent** by the properties of the underlying
+    ///   per-CRDT merges.
+    pub fn merge(&mut self, other: &StateStore) {
+        self.update_clock(other.clock.time());
+
+        let node_id = self.node_id.clone();
+
+        for (key, other_reg) in &other.registers {
+            let reg = self
+                .registers
+                .entry(key.clone())
+                .or_insert_with(|| LWWRegister::new(node_id.clone()));
+            reg.merge(other_reg);
+        }
+
+        for (key, other_set) in &other.sets {
+            let set = self
+                .sets
+                .entry(key.clone())
+                .or_insert_with(|| ORSet::new(node_id.clone()));
+            set.merge(other_set);
+        }
+
+        for (key, other_seq) in &other.sequences {
+            let seq = self
+                .sequences
+                .entry(key.clone())
+                .or_insert_with(|| RGA::new(node_id.clone()));
+            seq.merge(other_seq);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -412,5 +454,104 @@ mod tests {
         b.apply_envelope(env);
 
         assert_eq!(b.get_register::<i32>("k"), Some(7));
+    }
+
+    // ── merge() tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_register_state() {
+        let mut a = StateStore::new("A");
+        let mut b = StateStore::new("B");
+
+        a.set_register("x", 10_i64);
+        b.merge(&a);
+
+        assert_eq!(b.get_register::<i64>("x"), Some(10));
+    }
+
+    #[test]
+    fn merge_register_is_commutative() {
+        let mut a = StateStore::new("A");
+        let mut b = StateStore::new("B");
+
+        a.set_register("val", 1_i32);
+        b.set_register("val", 2_i32);
+
+        let mut a2 = StateStore::new("A");
+        a2.set_register("val", 1_i32);
+        let mut b2 = StateStore::new("B");
+        b2.set_register("val", 2_i32);
+
+        a.merge(&b2);  // a absorbs b
+        b.merge(&a2);  // b absorbs a
+
+        // Both must converge to the same value
+        assert_eq!(
+            a.get_register::<i32>("val"),
+            b.get_register::<i32>("val")
+        );
+    }
+
+    #[test]
+    fn merge_set_state() {
+        let mut a = StateStore::new("A");
+        let mut b = StateStore::new("B");
+
+        a.set_add("fleet", "unit-1");
+        b.set_add("fleet", "unit-2");
+
+        a.merge(&b);
+
+        assert!(a.set_contains("fleet", &"unit-1"));
+        assert!(a.set_contains("fleet", &"unit-2"));
+    }
+
+    #[test]
+    fn merge_sequence_state() {
+        let mut a = StateStore::new("A");
+        let mut b = StateStore::new("B");
+
+        a.seq_insert("log", 0, "entry-A");
+        b.seq_insert("log", 0, "entry-B");
+
+        let b_items: Vec<String> = b.seq_items("log");
+        assert_eq!(b_items.len(), 1);
+
+        a.merge(&b);
+
+        // Both entries must appear after merge
+        let items: Vec<String> = a.seq_items("log");
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn merge_is_idempotent() {
+        let mut a = StateStore::new("A");
+        a.set_register("k", 42_i32);
+        a.set_add("s", "item");
+        a.seq_insert("seq", 0, "v");
+
+        let snapshot = a.clone();
+        a.merge(&snapshot);
+        a.merge(&snapshot);
+
+        assert_eq!(a.get_register::<i32>("k"), Some(42));
+        assert!(a.set_contains("s", &"item"));
+        assert_eq!(a.seq_items::<String>("seq"), vec!["v".to_string()]);
+    }
+
+    #[test]
+    fn merge_advances_clock() {
+        let mut a = StateStore::new("A");
+        let mut b = StateStore::new("B");
+
+        // Advance b's clock significantly
+        for _ in 0..10 {
+            b.set_register("dummy", 0_i32);
+        }
+
+        let clock_before = a.clock();
+        a.merge(&b);
+        assert!(a.clock() > clock_before);
     }
 }
