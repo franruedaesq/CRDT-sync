@@ -33,13 +33,23 @@ export interface WebSocketLike {
  *
  * ```
  * Local write
- *   → CrdtStateProxy.onUpdate  (envelope)
- *   → WebSocket.send(envelope)            // broadcast to peers
+ *   → CrdtStateProxy.onUpdate  (envelope collected in _pendingEnvelopes)
+ *   → requestAnimationFrame / setTimeout schedules a batch flush
+ *   → WebSocket.send(JSON.stringify(envelopes))   // one payload per frame
  *
- * Incoming message
- *   → WebSocket.onmessage  (envelope)
+ * Incoming message (single envelope or JSON array of envelopes)
+ *   → WebSocket.onmessage
  *   → WasmStateStore.apply_envelope()    // merge into local store
  * ```
+ *
+ * ## Throttling / batching
+ *
+ * Multiple proxy writes that occur within the same JavaScript task (e.g. a
+ * 60 FPS game loop) are collected in `_pendingEnvelopes` and sent as a single
+ * JSON array payload on the next animation frame (browser) or the next
+ * `setTimeout(fn, 0)` tick (Node.js / non-browser environments).  This keeps
+ * network traffic proportional to frame rate rather than to the raw mutation
+ * rate.
  *
  * ## Usage
  *
@@ -52,7 +62,7 @@ export interface WebSocketLike {
  * const proxy = new CrdtStateProxy(store);
  * const manager = new WebSocketManager(store, proxy, new WebSocket('wss://example.com/sync'));
  *
- * // Writes are automatically broadcast to peers.
+ * // Writes are automatically batched and broadcast to peers.
  * proxy.state.robot = { x: 10, y: 20 };
  *
  * // Clean up.
@@ -64,6 +74,10 @@ export class WebSocketManager {
   private readonly _proxy: CrdtStateProxy;
   private readonly _ws: WebSocketLike;
   private _unsubscribe: (() => void) | null = null;
+  /** Envelopes collected in the current frame, waiting for the batch flush. */
+  private _pendingEnvelopes: string[] = [];
+  /** Cancels the currently scheduled batch flush (rAF or setTimeout handle). */
+  private _cancelFlush: (() => void) | null = null;
   /** Envelopes queued while the socket is not open, flushed on reconnection. */
   private _offlineQueue: string[] = [];
 
@@ -88,33 +102,93 @@ export class WebSocketManager {
   private _attach(): void {
     const ws = this._ws;
 
-    // Subscribe to proxy updates immediately. When the socket is open,
-    // envelopes are sent right away; otherwise they are buffered for later.
+    // Collect envelopes and schedule a batch flush once per frame so that
+    // multiple synchronous writes (e.g. a 60 FPS game loop) are coalesced
+    // into a single network payload instead of one message per mutation.
     this._unsubscribe = this._proxy.onUpdate(({ envelope }) => {
-      if (ws.readyState === 1 /* OPEN */) {
-        ws.send(envelope);
-      } else {
-        this._offlineQueue.push(envelope);
-      }
+      this._pendingEnvelopes.push(envelope);
+      this._scheduleBatchFlush();
     });
 
-    // On (re)connection, flush any envelopes that were queued while offline.
+    // On (re)connection, immediately flush pending envelopes together with any
+    // envelopes that were queued while the socket was offline.
     ws.onopen = () => {
-      const queued = this._offlineQueue.splice(0);
-      for (const envelope of queued) {
-        ws.send(envelope);
+      // Cancel any scheduled flush — we will drain everything right now.
+      this._cancelFlush?.();
+      this._cancelFlush = null;
+      const offline = this._offlineQueue;
+      const pending = this._pendingEnvelopes;
+      this._offlineQueue = [];
+      this._pendingEnvelopes = [];
+      const batch = [...offline, ...pending];
+      if (batch.length > 0) {
+        ws.send(JSON.stringify(batch));
       }
     };
 
-    // Apply envelopes received from peers to the local store.
+    // Apply envelopes received from peers.  Peers may send either a single
+    // envelope JSON string or a JSON array of envelope strings (batch format).
     ws.onmessage = (event) => {
-      this._store.apply_envelope(event.data);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(event.data);
+      } catch {
+        parsed = null;
+      }
+      if (Array.isArray(parsed)) {
+        for (const env of parsed) {
+          this._store.apply_envelope(env as string);
+        }
+      } else {
+        // Fallback: treat the raw frame data as a single envelope string.
+        this._store.apply_envelope(event.data);
+      }
     };
 
     // On close or error the subscription stays active so that writes made
     // while offline are buffered and flushed when the socket reconnects.
     ws.onclose = () => { /* keep buffering */ };
     ws.onerror = () => { /* keep buffering */ };
+  }
+
+  /**
+   * Schedule a single batch flush for the current frame.  Subsequent calls
+   * before the flush fires are no-ops (only one flush is ever outstanding).
+   *
+   * Uses `requestAnimationFrame` when available (browser, ~60 FPS cadence),
+   * falling back to `setTimeout(fn, 0)` in non-browser environments.
+   */
+  private _scheduleBatchFlush(): void {
+    if (this._cancelFlush !== null) return; // already scheduled
+
+    const doFlush = () => {
+      this._cancelFlush = null;
+      this._flushBatch();
+    };
+
+    if (typeof requestAnimationFrame === 'function') {
+      const id = requestAnimationFrame(doFlush);
+      this._cancelFlush = () => cancelAnimationFrame(id);
+    } else {
+      const id = setTimeout(doFlush, 0);
+      this._cancelFlush = () => clearTimeout(id);
+    }
+  }
+
+  /**
+   * Send all pending envelopes as a single JSON-array payload, or move them
+   * to the offline queue if the socket is not currently open.
+   */
+  private _flushBatch(): void {
+    const envelopes = this._pendingEnvelopes.splice(0);
+    if (envelopes.length === 0) return;
+
+    const ws = this._ws;
+    if (ws.readyState === 1 /* OPEN */) {
+      ws.send(JSON.stringify(envelopes));
+    } else {
+      this._offlineQueue.push(...envelopes);
+    }
   }
 
   // ── Public API ────────────────────────────────────────────────────────
@@ -128,6 +202,9 @@ export class WebSocketManager {
   disconnect(): void {
     this._unsubscribe?.();
     this._unsubscribe = null;
+    this._cancelFlush?.();
+    this._cancelFlush = null;
+    this._pendingEnvelopes = [];
     this._offlineQueue = [];
     this._ws.close();
   }
