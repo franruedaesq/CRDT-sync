@@ -1,0 +1,17 @@
+[package]
+name = "crdt-sync"
+version = "0.1.0"
+edition = "2024"
+description = "A generic state synchronization engine based on CRDTs (Conflict-free Replicated Data Types) for keeping distributed state in harmony without conflicts."
+license = "MIT"
+repository = "https://github.com/franruedaesq/CRDT-sync"
+keywords = ["crdt", "sync", "distributed", "state", "conflict-free"]
+categories = ["data-structures", "network-programming"]
+readme = "README.md"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
