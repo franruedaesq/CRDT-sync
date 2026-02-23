@@ -28,6 +28,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::lamport_clock::LamportClock;
 use crate::lww_register::{LWWOp, LWWRegister};
 use crate::or_set::{ORSet, ORSetOp};
 use crate::rga::{RGAOp, RGA};
@@ -80,7 +81,7 @@ type JsonRGA = RGA<serde_json::Value>;
 /// A multi-CRDT state synchronization engine.
 pub struct StateStore {
     node_id: String,
-    clock: u64,
+    clock: LamportClock,
     registers: HashMap<String, JsonRegister>,
     sets: HashMap<String, JsonORSet>,
     sequences: HashMap<String, JsonRGA>,
@@ -91,7 +92,7 @@ impl StateStore {
     pub fn new(node_id: impl Into<String>) -> Self {
         Self {
             node_id: node_id.into(),
-            clock: 0,
+            clock: LamportClock::new(),
             registers: HashMap::new(),
             sets: HashMap::new(),
             sequences: HashMap::new(),
@@ -101,14 +102,16 @@ impl StateStore {
     // ── Clock ─────────────────────────────────────────────────────────────
 
     fn tick(&mut self) -> u64 {
-        self.clock += 1;
-        self.clock
+        self.clock.tick()
     }
 
     fn update_clock(&mut self, remote_ts: u64) {
-        if remote_ts > self.clock {
-            self.clock = remote_ts;
-        }
+        self.clock.update(remote_ts);
+    }
+
+    /// Return the current Lamport clock value for this node.
+    pub fn clock(&self) -> u64 {
+        self.clock.time()
     }
 
     // ── Register (LWW) ────────────────────────────────────────────────────
@@ -390,12 +393,12 @@ mod tests {
         for _ in 0..10 {
             b.set_register("dummy", 0_i32);
         }
-        assert_eq!(b.clock, 10);
+        assert_eq!(b.clock(), 10);
 
         // A receives from B → A's clock must catch up
         let env = b.set_register("x", 99_i32);
         a.apply_envelope(env);
-        assert!(a.clock >= 11);
+        assert!(a.clock() >= 11);
     }
 
     #[test]
