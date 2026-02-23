@@ -1,3 +1,4 @@
 /target
 /typescript/node_modules
 /typescript/dist
+/pkg
