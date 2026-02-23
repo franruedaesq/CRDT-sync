@@ -6,6 +6,9 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "build:wasm:bundler": "wasm-pack build .. --target bundler --out-dir pkg/bundler",
+    "build:wasm:web": "wasm-pack build .. --target web --out-dir pkg/web",
+    "build:wasm": "npm run build:wasm:bundler && npm run build:wasm:web",
     "test": "jest",
     "lint": "tsc --noEmit"
   },
