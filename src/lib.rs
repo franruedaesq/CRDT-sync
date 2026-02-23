@@ -51,6 +51,7 @@
 pub mod lamport_clock;
 pub mod lww_register;
 pub mod or_set;
+pub mod proxy;
 pub mod rga;
 pub mod state_store;
 pub mod vector_clock;
@@ -59,6 +60,7 @@ pub mod vector_clock;
 pub use lamport_clock::LamportClock;
 pub use lww_register::LWWRegister;
 pub use or_set::ORSet;
+pub use proxy::StateProxy;
 pub use rga::RGA;
 pub use state_store::StateStore;
 pub use vector_clock::{VectorClock, VectorTimestamp};
