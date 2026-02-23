@@ -50,6 +50,7 @@ function makeWebSocket(): MockWebSocket {
       ws.onclose?.({});
     },
     simulateError() {
+      ws.readyState = 3; // CLOSED – real browsers close the socket on error
       ws.onerror?.({});
     },
   };
@@ -217,5 +218,106 @@ describe('WebSocketManager – disconnect', () => {
     manager.disconnect();
 
     expect(ws.close).toHaveBeenCalledTimes(2); // close() itself may be called twice
+  });
+});
+
+// ── Offline buffering ─────────────────────────────────────────────────────────
+
+describe('WebSocketManager – offline buffering', () => {
+  test('buffers envelopes written while the socket is closed and flushes on reconnect', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const ws = makeWebSocket();
+    new WebSocketManager(store, proxy, ws);
+
+    ws.simulateOpen();
+    ws.simulateClose();
+
+    // Writes while offline should be buffered, not sent immediately.
+    (proxy.state as Record<string, unknown>).x = 1;
+    (proxy.state as Record<string, unknown>).y = 2;
+    expect(ws.send).not.toHaveBeenCalled();
+
+    // Reconnect: all buffered envelopes must be flushed in order.
+    ws.readyState = 1;
+    ws.simulateOpen();
+    expect(ws.send).toHaveBeenCalledTimes(2);
+    const first = JSON.parse(ws.send.mock.calls[0][0] as string) as Record<string, unknown>;
+    const second = JSON.parse(ws.send.mock.calls[1][0] as string) as Record<string, unknown>;
+    expect(first).toMatchObject({ op: { key: 'x' } });
+    expect(second).toMatchObject({ op: { key: 'y' } });
+  });
+
+  test('buffers envelopes written before the first connection opens', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const ws = makeWebSocket(); // readyState = 0 (CONNECTING)
+    new WebSocketManager(store, proxy, ws);
+
+    (proxy.state as Record<string, unknown>).a = 42;
+    expect(ws.send).not.toHaveBeenCalled();
+
+    ws.simulateOpen();
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse(ws.send.mock.calls[0][0] as string) as Record<string, unknown>;
+    expect(sent).toMatchObject({ op: { key: 'a' } });
+  });
+
+  test('buffers envelopes written after a WebSocket error and flushes on reconnect', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const ws = makeWebSocket();
+    new WebSocketManager(store, proxy, ws);
+
+    ws.simulateOpen();
+    ws.simulateError(); // sets readyState = 3
+
+    (proxy.state as Record<string, unknown>).z = 99;
+    expect(ws.send).not.toHaveBeenCalled();
+
+    ws.readyState = 1;
+    ws.simulateOpen();
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse(ws.send.mock.calls[0][0] as string) as Record<string, unknown>;
+    expect(sent).toMatchObject({ op: { key: 'z' } });
+  });
+
+  test('discards the offline buffer when disconnect is called', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const ws = makeWebSocket();
+    const manager = new WebSocketManager(store, proxy, ws);
+
+    ws.simulateOpen();
+    ws.simulateClose();
+
+    (proxy.state as Record<string, unknown>).x = 1;
+
+    manager.disconnect();
+
+    // Reconnecting after an explicit disconnect should not flush the old buffer.
+    ws.readyState = 1;
+    ws.simulateOpen();
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  test('sends normally after reconnect when no envelopes were buffered', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const ws = makeWebSocket();
+    new WebSocketManager(store, proxy, ws);
+
+    ws.simulateOpen();
+    ws.simulateClose();
+
+    // No writes while offline.
+    ws.readyState = 1;
+    ws.simulateOpen();
+
+    // Write after reconnect is sent directly.
+    (proxy.state as Record<string, unknown>).n = 5;
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse(ws.send.mock.calls[0][0] as string) as Record<string, unknown>;
+    expect(sent).toMatchObject({ op: { key: 'n' } });
   });
 });
