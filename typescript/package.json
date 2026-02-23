@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "npm run build:wasm:bundler && mkdir -p dist && cp pkg/bundler/*.wasm dist/ && tsc",
     "build:wasm:bundler": "wasm-pack build .. --target bundler --out-dir pkg/bundler",
     "build:wasm:web": "wasm-pack build .. --target web --out-dir pkg/web",
     "build:wasm": "npm run build:wasm:bundler && npm run build:wasm:web",
