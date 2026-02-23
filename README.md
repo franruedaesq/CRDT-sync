@@ -22,6 +22,17 @@ network drops for a moment. No locks, no merge conflicts, no data loss.
 | [`RGA`] | Replicated Growable Array | Ordered sequences / lists |
 | [`StateStore`] | Composite sync engine | Hosts all CRDTs under one roof with Lamport clocks and network `Envelope`s |
 
+### Logical Clocks
+
+Physical wall-clock time (NTP) is unreliable for distributed synchronization.
+This library provides two implementations that track causal ordering without
+relying on system time:
+
+| Clock | Module | Use case |
+|-------|--------|----------|
+| [`LamportClock`] | `lamport_clock` | Scalar logical clock; used internally by `StateStore` for total-order timestamps |
+| [`VectorClock`] | `vector_clock` | Per-node vector clock; detects **concurrent** events in addition to causal ordering |
+
 All CRDTs are **operation-based (CmRDT)** and satisfy:
 - **Commutativity** – apply operations in any order, always converge.
 - **Idempotency** – replaying an operation is safe.
@@ -98,7 +109,7 @@ assert_eq!(node_a.to_vec(), node_b.to_vec()); // ['H', 'i']
 
 The `StateStore` is the recommended high-level API. It:
 - Manages named LWW registers, OR-Sets and RGAs in one place.
-- Assigns **Lamport timestamps** automatically.
+- Assigns **Lamport timestamps** automatically (via the built-in `LamportClock`).
 - Produces **`Envelope`** messages ready to send over a network channel.
 
 ```rust
@@ -128,16 +139,57 @@ assert_eq!(
 );
 ```
 
+### LamportClock
+
+```rust
+use crdt_sync::LamportClock;
+
+let mut node_a = LamportClock::new();
+let mut node_b = LamportClock::new();
+
+// node_a produces and sends an event
+let ts = node_a.tick(); // ts = 1
+
+// node_b receives it, then produces its own event
+node_b.update(ts);      // b advances to max(0, 1) + 1 = 2
+let ts_b = node_b.tick(); // ts_b = 3
+
+assert!(ts_b > ts);
+```
+
+### VectorClock
+
+```rust
+use crdt_sync::VectorClock;
+
+let mut a = VectorClock::new("A");
+let mut b = VectorClock::new("B");
+
+let v_a = a.increment(); // A sends {A:1}
+let v_b = b.increment(); // B sends {B:1} – concurrent with v_a
+
+// Neither causally precedes the other
+assert!(v_a.concurrent_with(&v_b));
+
+// B receives A's event
+b.update(&v_a);
+let v_b2 = b.increment(); // {A:1, B:2} – causally after v_a
+
+assert!(v_a.happened_before(&v_b2));
+```
+
 ---
 
 ## Architecture
 
 ```
 crdt-sync
+├── lamport_clock – Scalar Lamport logical clock (tick / update rules)
+├── vector_clock  – Per-node vector clock (happened-before / concurrent detection)
 ├── lww_register  – LWW-Register CmRDT
 ├── or_set        – OR-Set CmRDT
 ├── rga           – RGA CmRDT (with causal buffering)
-└── state_store   – Composite sync engine (Lamport clock + Envelope)
+└── state_store   – Composite sync engine (LamportClock + Envelope)
 ```
 
 Each module is self-contained and can be used independently. The `StateStore`

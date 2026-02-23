@@ -13,6 +13,16 @@
 //! - [`rga::RGA`] – Replicated Growable Array for ordered sequences / lists.
 //! - [`state_store::StateStore`] – A composite synchronization engine that hosts multiple CRDTs.
 //!
+//! ## Logical clocks
+//!
+//! Physical wall-clock time (NTP) is unreliable in distributed systems. This library provides
+//! two implementations for tracking causal ordering of events:
+//!
+//! - [`lamport_clock::LamportClock`] – A scalar Lamport clock. Sufficient for total-order
+//!   disambiguation used by [`LWWRegister`] and [`StateStore`].
+//! - [`vector_clock::VectorClock`] – A per-node vector clock that can detect **concurrent**
+//!   events in addition to causal ordering.
+//!
 //! ## Quick example
 //!
 //! ```rust
@@ -38,14 +48,18 @@
 //! assert_eq!(rga.to_vec(), vec!['H', 'i']);
 //! ```
 
+pub mod lamport_clock;
 pub mod lww_register;
 pub mod or_set;
 pub mod rga;
 pub mod state_store;
+pub mod vector_clock;
 
 // Re-export the most commonly used types for ergonomic access.
+pub use lamport_clock::LamportClock;
 pub use lww_register::LWWRegister;
 pub use or_set::ORSet;
 pub use rga::RGA;
 pub use state_store::StateStore;
+pub use vector_clock::{VectorClock, VectorTimestamp};
 
