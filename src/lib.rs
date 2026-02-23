@@ -13,6 +13,13 @@
 //! - [`rga::RGA`] – Replicated Growable Array for ordered sequences / lists.
 //! - [`state_store::StateStore`] – A composite synchronization engine that hosts multiple CRDTs.
 //!
+//! ## State observation (proxying)
+//!
+//! - [`proxy::StateProxy`] – Wraps a [`StateStore`] and intercepts mutations, automatically
+//!   queuing CRDT operations for broadcast so developers never touch [`Envelope`] values.
+//! - [`crdt_state!`] – Macro that generates a **typed** proxy struct from a field declaration;
+//!   each field produces `set_<field>` / `get_<field>` methods with compile-time type safety.
+//!
 //! ## Logical clocks
 //!
 //! Physical wall-clock time (NTP) is unreliable in distributed systems. This library provides
@@ -50,6 +57,7 @@
 
 pub mod lamport_clock;
 pub mod lww_register;
+pub mod macros;
 pub mod or_set;
 pub mod proxy;
 pub mod rga;
