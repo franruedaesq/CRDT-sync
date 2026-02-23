@@ -1,0 +1,214 @@
+import { CrdtStateProxy, WasmStateStore, UpdateEvent } from '../CrdtStateProxy';
+
+// ── Mock WasmStateStore ───────────────────────────────────────────────────────
+
+function makeStore(): jest.Mocked<WasmStateStore> {
+  const store: Record<string, string> = {};
+  return {
+    set_register: jest.fn((key: string, value_json: string) => {
+      store[key] = value_json;
+      // Return a minimal fake envelope JSON.
+      return JSON.stringify({ timestamp: 1, node_id: 'node-1', op: { kind: 'Register', key, op: { value: JSON.parse(value_json), timestamp: 1, node_id: 'node-1' } } });
+    }),
+    get_register: jest.fn((key: string) => store[key]),
+    apply_envelope: jest.fn(),
+  };
+}
+
+// ── set_register is called on property write ──────────────────────────────────
+
+describe('CrdtStateProxy – Wasm call on property write', () => {
+  test('writes a top-level property via set_register', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    (proxy.state as Record<string, unknown>).speed = 100;
+
+    expect(store.set_register).toHaveBeenCalledWith('speed', JSON.stringify(100));
+  });
+
+  test('writes a nested property with a dot-separated key', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    (proxy.state as Record<string, Record<string, unknown>>).robot.speed = 100;
+
+    expect(store.set_register).toHaveBeenCalledWith('robot.speed', JSON.stringify(100));
+  });
+
+  test('writes a deeply nested property with a full dot path', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    const s = proxy.state as Record<string, Record<string, Record<string, unknown>>>;
+    s.fleet.robot.x = 42;
+
+    expect(store.set_register).toHaveBeenCalledWith('fleet.robot.x', JSON.stringify(42));
+  });
+
+  test('serialises string values as JSON', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    (proxy.state as Record<string, unknown>).name = 'robot-1';
+
+    expect(store.set_register).toHaveBeenCalledWith('name', JSON.stringify('robot-1'));
+  });
+
+  test('serialises boolean values as JSON', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    (proxy.state as Record<string, unknown>).active = true;
+
+    expect(store.set_register).toHaveBeenCalledWith('active', JSON.stringify(true));
+  });
+
+  test('serialises object values as JSON', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    (proxy.state as Record<string, unknown>).config = { retry: 3 };
+
+    expect(store.set_register).toHaveBeenCalledWith('config', JSON.stringify({ retry: 3 }));
+  });
+});
+
+// ── onUpdate event emitter ────────────────────────────────────────────────────
+
+describe('CrdtStateProxy – onUpdate event emitter', () => {
+  test('fires onUpdate listener on property write', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const handler = jest.fn();
+
+    proxy.onUpdate(handler);
+    (proxy.state as Record<string, unknown>).speed = 100;
+
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  test('passes correct key and value to onUpdate listener', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const events: UpdateEvent[] = [];
+
+    proxy.onUpdate((e) => events.push(e));
+    (proxy.state as Record<string, unknown>).speed = 100;
+
+    expect(events[0].key).toBe('speed');
+    expect(events[0].value).toBe(100);
+  });
+
+  test('passes the envelope string from set_register to onUpdate', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const events: UpdateEvent[] = [];
+
+    proxy.onUpdate((e) => events.push(e));
+    (proxy.state as Record<string, unknown>).x = 42;
+
+    const expectedEnvelope = store.set_register.mock.results[0].value as string;
+    expect(events[0].envelope).toBe(expectedEnvelope);
+  });
+
+  test('fires onUpdate with dot-separated key for nested writes', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const events: UpdateEvent[] = [];
+
+    proxy.onUpdate((e) => events.push(e));
+    (proxy.state as Record<string, Record<string, unknown>>).robot.speed = 100;
+
+    expect(events[0].key).toBe('robot.speed');
+    expect(events[0].value).toBe(100);
+  });
+
+  test('fires multiple registered listeners', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const handler1 = jest.fn();
+    const handler2 = jest.fn();
+
+    proxy.onUpdate(handler1);
+    proxy.onUpdate(handler2);
+    (proxy.state as Record<string, unknown>).x = 1;
+
+    expect(handler1).toHaveBeenCalledTimes(1);
+    expect(handler2).toHaveBeenCalledTimes(1);
+  });
+
+  test('unsubscribe removes the listener', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const handler = jest.fn();
+
+    const unsubscribe = proxy.onUpdate(handler);
+    unsubscribe();
+    (proxy.state as Record<string, unknown>).x = 1;
+
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  test('unsubscribe only removes the specific listener', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const handler1 = jest.fn();
+    const handler2 = jest.fn();
+
+    const unsubscribe1 = proxy.onUpdate(handler1);
+    proxy.onUpdate(handler2);
+    unsubscribe1();
+    (proxy.state as Record<string, unknown>).x = 1;
+
+    expect(handler1).not.toHaveBeenCalled();
+    expect(handler2).toHaveBeenCalledTimes(1);
+  });
+
+  test('does not fire listener after multiple unsubscribes', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const handler = jest.fn();
+
+    const unsubscribe = proxy.onUpdate(handler);
+    unsubscribe();
+    unsubscribe(); // calling twice is safe
+    (proxy.state as Record<string, unknown>).x = 1;
+
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  test('fires listener for each individual write', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const handler = jest.fn();
+
+    proxy.onUpdate(handler);
+    (proxy.state as Record<string, unknown>).a = 1;
+    (proxy.state as Record<string, unknown>).b = 2;
+    (proxy.state as Record<string, unknown>).c = 3;
+
+    expect(handler).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ── state accessor ────────────────────────────────────────────────────────────
+
+describe('CrdtStateProxy – state accessor', () => {
+  test('state getter returns the same proxy object on repeated access', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    expect(proxy.state).toBe(proxy.state);
+  });
+
+  test('nested child proxies are stable across multiple accesses', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    const robot1 = (proxy.state as Record<string, unknown>).robot;
+    const robot2 = (proxy.state as Record<string, unknown>).robot;
+
+    expect(robot1).toBe(robot2);
+  });
+});
