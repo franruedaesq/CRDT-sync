@@ -22,6 +22,7 @@ network drops for a moment. No locks, no merge conflicts, no data loss.
 | [`RGA`] | Replicated Growable Array | Ordered sequences / lists |
 | [`StateStore`] | Composite sync engine | Hosts all CRDTs under one roof with Lamport clocks and network `Envelope`s |
 | [`StateProxy`] | State observation proxy | Intercepts field mutations and auto-queues CRDT operations (no manual `Envelope` handling) |
+| [`crdt_state!`] | Typed state proxy macro | Generates a typed proxy struct from a field declaration; each field gets `set_<field>` / `get_<field>` methods with compile-time type safety |
 
 ### Logical Clocks
 
@@ -219,7 +220,58 @@ assert_eq!(store_b.seq_items::<String>("log"), vec!["boot"]);
 
 ---
 
-## Architecture
+### `crdt_state!` Macro (Typed State Proxy)
+
+The `crdt_state!` macro generates a **typed proxy struct** from a plain struct-like
+field declaration.  Instead of using string keys (`proxy.set("x", 10.0)`), you get
+compile-time-checked `set_x` / `get_x` methods for every declared field.
+
+```rust
+use crdt_sync::state_store::StateStore;
+use crdt_sync::crdt_state;
+
+// Declare a typed state proxy struct.
+crdt_state! {
+    pub struct RobotState {
+        x: f64,
+        y: f64,
+        speed: f64,
+        name: String,
+        active: bool,
+    }
+}
+
+let mut store_a = StateStore::new("node-A");
+let mut store_b = StateStore::new("node-B");
+
+// Mutations are intercepted; no Envelope handling required.
+let ops = {
+    let mut state = RobotState::new(&mut store_a);
+    state
+        .set_x(3.0)
+        .set_y(4.0)
+        .set_speed(5.0)
+        .set_name("unit-7".to_string())
+        .set_active(true);
+
+    state.drain_pending()   // collect queued ops for broadcast
+};
+
+// Broadcast to all peers.
+for env in ops {
+    store_b.apply_envelope(env);
+}
+
+assert_eq!(store_b.get_register::<f64>("x"),      Some(3.0));
+assert_eq!(store_b.get_register::<f64>("speed"),  Some(5.0));
+assert_eq!(store_b.get_register::<bool>("active"), Some(true));
+```
+
+The generated struct also exposes:
+- `pending_count() -> usize` – number of ops queued for broadcast.
+- `store() -> &StateStore` – read-only access to the underlying store.
+
+---
 
 ```
 crdt-sync
@@ -229,7 +281,8 @@ crdt-sync
 ├── or_set        – OR-Set CmRDT
 ├── rga           – RGA CmRDT (with causal buffering)
 ├── state_store   – Composite sync engine (LamportClock + Envelope)
-└── proxy         – StateProxy: intercepts mutations, auto-queues CRDT ops
+├── proxy         – StateProxy: intercepts mutations, auto-queues CRDT ops
+└── macros        – crdt_state! macro: typed proxy structs from field declarations
 ```
 
 Each module is self-contained and can be used independently. The `StateStore`
