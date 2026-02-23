@@ -261,6 +261,24 @@ impl StateStore {
         }
     }
 
+    /// Return the number of visible elements in the named sequence.
+    pub fn seq_len(&self, key: &str) -> usize {
+        self.sequences.get(key).map_or(0, |s| s.len())
+    }
+
+    // ── Proxy ─────────────────────────────────────────────────────────────
+
+    /// Create a [`StateProxy`] backed by this store.
+    ///
+    /// The proxy intercepts field mutations and automatically queues CRDT
+    /// operations for broadcast, so callers never need to handle [`Envelope`]
+    /// values directly.
+    ///
+    /// [`StateProxy`]: crate::proxy::StateProxy
+    pub fn proxy(&mut self) -> crate::proxy::StateProxy<'_> {
+        crate::proxy::StateProxy::new(self)
+    }
+
     // ── Apply remote envelopes ────────────────────────────────────────────
 
     /// Apply an [`Envelope`] received from a remote node.

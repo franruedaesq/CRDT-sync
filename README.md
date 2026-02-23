@@ -21,6 +21,7 @@ network drops for a moment. No locks, no merge conflicts, no data loss.
 | [`ORSet`] | Observed-Remove Set | Collections of unique items |
 | [`RGA`] | Replicated Growable Array | Ordered sequences / lists |
 | [`StateStore`] | Composite sync engine | Hosts all CRDTs under one roof with Lamport clocks and network `Envelope`s |
+| [`StateProxy`] | State observation proxy | Intercepts field mutations and auto-queues CRDT operations (no manual `Envelope` handling) |
 
 ### Logical Clocks
 
@@ -180,6 +181,44 @@ assert!(v_a.happened_before(&v_b2));
 
 ---
 
+### StateProxy (State Observation)
+
+`StateProxy` is the Rust equivalent of JavaScript Proxy-based state observation.
+It wraps a `StateStore` and **intercepts every field mutation**, automatically
+converting it into a CRDT operation and queuing it for broadcast.  Developers
+work with plain `set` / `get` calls and never touch `Envelope` values directly.
+
+```rust
+use crdt_sync::state_store::StateStore;
+use crdt_sync::proxy::StateProxy;
+
+let mut store_a = StateStore::new("node-A");
+let mut store_b = StateStore::new("node-B");
+
+// Use the proxy – no manual Envelope handling required.
+let ops = {
+    let mut proxy = store_a.proxy();     // or StateProxy::new(&mut store_a)
+    proxy
+        .set("robot.x", 10.0_f64)       // scalar field
+        .set("robot.y", 20.0_f64)
+        .set_add("fleet", "unit-1")      // set field
+        .seq_push("log", "boot");        // sequence field
+
+    proxy.drain_pending()                // collect queued ops for broadcast
+};
+
+// Broadcast to all peers.
+for env in ops {
+    store_b.apply_envelope(env);
+}
+
+assert_eq!(store_b.get_register::<f64>("robot.x"), Some(10.0));
+assert!(store_b.set_contains("fleet", &"unit-1"));
+assert_eq!(store_b.seq_items::<String>("log"), vec!["boot"]);
+```
+
+---
+
 ## Architecture
 
 ```
@@ -189,7 +228,8 @@ crdt-sync
 ├── lww_register  – LWW-Register CmRDT
 ├── or_set        – OR-Set CmRDT
 ├── rga           – RGA CmRDT (with causal buffering)
-└── state_store   – Composite sync engine (LamportClock + Envelope)
+├── state_store   – Composite sync engine (LamportClock + Envelope)
+└── proxy         – StateProxy: intercepts mutations, auto-queues CRDT ops
 ```
 
 Each module is self-contained and can be used independently. The `StateStore`
