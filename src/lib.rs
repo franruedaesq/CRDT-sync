@@ -63,6 +63,7 @@ pub mod proxy;
 pub mod rga;
 pub mod state_store;
 pub mod vector_clock;
+pub mod wasm;
 
 // Re-export the most commonly used types for ergonomic access.
 pub use lamport_clock::LamportClock;
