@@ -64,6 +64,8 @@ export class WebSocketManager {
   private readonly _proxy: CrdtStateProxy;
   private readonly _ws: WebSocketLike;
   private _unsubscribe: (() => void) | null = null;
+  /** Envelopes queued while the socket is not open, flushed on reconnection. */
+  private _offlineQueue: string[] = [];
 
   /**
    * Create a `WebSocketManager` and attach it to the given WebSocket.
@@ -86,14 +88,22 @@ export class WebSocketManager {
   private _attach(): void {
     const ws = this._ws;
 
-    // Subscribe to proxy updates once the connection is open so that every
-    // CRDT envelope is immediately broadcast.
+    // Subscribe to proxy updates immediately. When the socket is open,
+    // envelopes are sent right away; otherwise they are buffered for later.
+    this._unsubscribe = this._proxy.onUpdate(({ envelope }) => {
+      if (ws.readyState === 1 /* OPEN */) {
+        ws.send(envelope);
+      } else {
+        this._offlineQueue.push(envelope);
+      }
+    });
+
+    // On (re)connection, flush any envelopes that were queued while offline.
     ws.onopen = () => {
-      this._unsubscribe = this._proxy.onUpdate(({ envelope }) => {
-        if (ws.readyState === 1 /* OPEN */) {
-          ws.send(envelope);
-        }
-      });
+      const queued = this._offlineQueue.splice(0);
+      for (const envelope of queued) {
+        ws.send(envelope);
+      }
     };
 
     // Apply envelopes received from peers to the local store.
@@ -101,29 +111,24 @@ export class WebSocketManager {
       this._store.apply_envelope(event.data);
     };
 
-    // Unsubscribe from proxy updates when the connection closes.
-    ws.onclose = () => {
-      this._unsubscribe?.();
-      this._unsubscribe = null;
-    };
-
-    // Also clean up on errors so stale listeners are not kept alive.
-    ws.onerror = () => {
-      this._unsubscribe?.();
-      this._unsubscribe = null;
-    };
+    // On close or error the subscription stays active so that writes made
+    // while offline are buffered and flushed when the socket reconnects.
+    ws.onclose = () => { /* keep buffering */ };
+    ws.onerror = () => { /* keep buffering */ };
   }
 
   // ── Public API ────────────────────────────────────────────────────────
 
   /**
-   * Unsubscribe from proxy updates and close the WebSocket connection.
+   * Unsubscribe from proxy updates, discard any buffered envelopes, and close
+   * the WebSocket connection.
    *
    * Safe to call more than once.
    */
   disconnect(): void {
     this._unsubscribe?.();
     this._unsubscribe = null;
+    this._offlineQueue = [];
     this._ws.close();
   }
 }
