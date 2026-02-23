@@ -299,6 +299,56 @@ impl<T: Clone + PartialEq> RGA<T> {
         self.apply(op.clone());
         Some(op)
     }
+
+    /// Merge another RGA's state into this one (state-based / CvRDT).
+    ///
+    /// Every element present in `other` but absent from `self` is inserted at
+    /// the correct position according to the RGA ordering rules (deterministic
+    /// RGAId comparison breaks ties). Elements tombstoned in `other` are also
+    /// tombstoned in `self`.
+    ///
+    /// - **Commutative**: merging in either direction yields the same visible
+    ///   sequence because element positions are determined by RGAId ordering.
+    /// - **Associative** and **idempotent** by the properties of the underlying
+    ///   set-union and the deterministic ordering.
+    pub fn merge(&mut self, other: &RGA<T>) {
+        // Advance our clock so any IDs we import don't collide with future local ones.
+        if other.clock > self.clock {
+            self.clock = other.clock;
+        }
+
+        // Replay inserts from `other` that we don't already have.
+        // We iterate in `other.nodes` order so that causal predecessors are
+        // inserted before their successors (or buffered automatically if not).
+        for i in 0..other.nodes.len() {
+            let node = &other.nodes[i];
+            if self.pos_of(&node.id).is_none() {
+                // Find the nearest predecessor in `other.nodes[..i]` that is
+                // already present in `self` (accounts for nodes we just added).
+                let after_id = other.nodes[..i]
+                    .iter()
+                    .rev()
+                    .find(|n| self.pos_of(&n.id).is_some())
+                    .map(|n| n.id.clone());
+
+                let op = RGAOp::Insert {
+                    id: node.id.clone(),
+                    after_id,
+                    value: node.value.clone(),
+                };
+                self.apply(op);
+            }
+        }
+
+        // Propagate tombstones: if a node is deleted in `other`, delete it here.
+        for node in &other.nodes {
+            if node.deleted {
+                if let Some(pos) = self.pos_of(&node.id) {
+                    self.nodes[pos].deleted = true;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -413,5 +463,146 @@ mod tests {
         // Apply delete on a before it even processes the delete locally
         a.apply(del);
         assert!(a.is_empty());
+    }
+
+    // ── merge() tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_empty_into_non_empty_is_noop() {
+        let mut a: RGA<char> = RGA::new("A");
+        a.insert(0, 'X');
+        let b: RGA<char> = RGA::new("B");
+        a.merge(&b);
+        assert_eq!(a.to_vec(), vec!['X']);
+    }
+
+    #[test]
+    fn merge_non_empty_into_empty() {
+        let mut a: RGA<char> = RGA::new("A");
+        let mut b: RGA<char> = RGA::new("B");
+        b.insert(0, 'H');
+        b.insert(1, 'i');
+        a.merge(&b);
+        assert_eq!(a.to_vec(), vec!['H', 'i']);
+    }
+
+    #[test]
+    fn merge_is_commutative() {
+        let mut a: RGA<char> = RGA::new("A");
+        let mut b: RGA<char> = RGA::new("B");
+
+        a.insert(0, 'A');
+        b.insert(0, 'B');
+
+        let a2 = a.clone();
+        let b2 = b.clone();
+
+        a.merge(&b);   // a absorbs b
+        b.merge(&a2);  // b absorbs a (using the original a)
+
+        // Both should have the same sequence (deterministic by RGAId ordering)
+        assert_eq!(a.to_vec(), b.to_vec());
+        assert_eq!(a.len(), 2);
+
+        // Verify a third way: b2 merged with a2
+        let mut b3 = b2.clone();
+        b3.merge(&a2);
+        assert_eq!(a.to_vec(), b3.to_vec());
+    }
+
+    #[test]
+    fn merge_is_associative() {
+        let mut a: RGA<char> = RGA::new("A");
+        let mut b: RGA<char> = RGA::new("B");
+        let mut c: RGA<char> = RGA::new("C");
+
+        a.insert(0, 'A');
+        b.insert(0, 'B');
+        c.insert(0, 'C');
+
+        // (a merge b) merge c
+        let mut ab = a.clone();
+        ab.merge(&b);
+        let mut ab_c = ab.clone();
+        ab_c.merge(&c);
+
+        // a merge (b merge c)
+        let mut bc = b.clone();
+        bc.merge(&c);
+        let mut a_bc = a.clone();
+        a_bc.merge(&bc);
+
+        assert_eq!(ab_c.to_vec(), a_bc.to_vec());
+    }
+
+    #[test]
+    fn merge_is_idempotent() {
+        let mut a: RGA<char> = RGA::new("A");
+        a.insert(0, 'X');
+        a.insert(1, 'Y');
+        let snapshot = a.clone();
+        a.merge(&snapshot);
+        a.merge(&snapshot);
+        assert_eq!(a.to_vec(), vec!['X', 'Y']);
+    }
+
+    #[test]
+    fn merge_propagates_tombstones() {
+        let mut a: RGA<char> = RGA::new("A");
+        let mut b: RGA<char> = RGA::new("B");
+
+        // Both replicas start with the same element
+        let op = a.insert(0, 'Z');
+        b.apply(op);
+
+        // a deletes it
+        a.delete(0);
+
+        // Merge a's state (with tombstone) into b
+        b.merge(&a);
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn merge_concurrent_inserts_converge() {
+        let mut a: RGA<char> = RGA::new("A");
+        let mut b: RGA<char> = RGA::new("B");
+
+        // Each inserts independently at position 0
+        a.insert(0, 'A');
+        b.insert(0, 'B');
+
+        let a2 = a.clone();
+        let b2 = b.clone();
+
+        a.merge(&b2);
+        b.merge(&a2);
+
+        // Both replicas must converge to the same sequence
+        assert_eq!(a.to_vec(), b.to_vec());
+        assert_eq!(a.len(), 2);
+    }
+
+    #[test]
+    fn merge_disjoint_sequences() {
+        let mut a: RGA<i32> = RGA::new("A");
+        let mut b: RGA<i32> = RGA::new("B");
+
+        // a has [1, 2, 3], b has [4, 5, 6]
+        for i in 1..=3 {
+            a.insert(a.len(), i);
+        }
+        for i in 4..=6 {
+            b.insert(b.len(), i);
+        }
+
+        let mut merged = a.clone();
+        merged.merge(&b);
+
+        // All 6 elements should be present
+        assert_eq!(merged.len(), 6);
+        let mut v = merged.to_vec();
+        v.sort();
+        assert_eq!(v, vec![1, 2, 3, 4, 5, 6]);
     }
 }

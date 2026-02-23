@@ -112,6 +112,27 @@ impl<T: Clone> LWWRegister<T> {
         self.apply(op.clone());
         op
     }
+
+    /// Merge another register's state into this one (state-based / CvRDT).
+    ///
+    /// Whichever state carries the higher `(timestamp, node_id)` pair wins,
+    /// producing the same result regardless of the order in which replicas are
+    /// merged.
+    ///
+    /// - **Commutative**: `a.merge(&b)` and `b.merge(&a)` converge to the same
+    ///   winning value.
+    /// - **Associative**: `(a.merge(&b)).merge(&c)` == `a.merge(&b.merge_cloned(&c))`.
+    /// - **Idempotent**: `a.merge(&a)` leaves the state unchanged.
+    pub fn merge(&mut self, other: &LWWRegister<T>) {
+        if let Some((value, timestamp, node_id)) = &other.state {
+            let op = LWWOp {
+                value: value.clone(),
+                timestamp: *timestamp,
+                node_id: node_id.clone(),
+            };
+            self.apply(op);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -193,5 +214,89 @@ mod tests {
         }
 
         assert_eq!(reg1.get(), reg2.get()); // both should settle on ts=3 → value 1
+    }
+
+    // ── merge() tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_empty_into_non_empty_is_noop() {
+        let mut a: LWWRegister<i32> = LWWRegister::new("n1");
+        a.set_and_apply(42, 1);
+        let b: LWWRegister<i32> = LWWRegister::new("n2");
+        a.merge(&b);
+        assert_eq!(a.get(), Some(&42));
+    }
+
+    #[test]
+    fn merge_non_empty_into_empty() {
+        let mut a: LWWRegister<i32> = LWWRegister::new("n1");
+        let mut b: LWWRegister<i32> = LWWRegister::new("n2");
+        b.set_and_apply(99, 5);
+        a.merge(&b);
+        assert_eq!(a.get(), Some(&99));
+        assert_eq!(a.timestamp(), Some(5));
+    }
+
+    #[test]
+    fn merge_is_commutative() {
+        let mut a: LWWRegister<i32> = LWWRegister::new("node-A");
+        let mut b: LWWRegister<i32> = LWWRegister::new("node-B");
+        a.set_and_apply(10, 3);
+        b.set_and_apply(20, 3); // same timestamp → node-B wins lexicographically
+
+        let a2 = a.clone();
+        let mut b2 = b.clone();
+
+        a.merge(&b);   // a absorbs b
+        b2.merge(&a2); // b absorbs a
+
+        assert_eq!(a.get(), b2.get()); // commutative: same winner
+    }
+
+    #[test]
+    fn merge_is_associative() {
+        let mut a: LWWRegister<i32> = LWWRegister::new("n1");
+        let mut b: LWWRegister<i32> = LWWRegister::new("n2");
+        let mut c: LWWRegister<i32> = LWWRegister::new("n3");
+        a.set_and_apply(1, 1);
+        b.set_and_apply(2, 2);
+        c.set_and_apply(3, 3);
+
+        // (a merge b) merge c
+        let mut ab = a.clone();
+        ab.merge(&b);
+        let mut ab_c = ab.clone();
+        ab_c.merge(&c);
+
+        // a merge (b merge c)
+        let mut bc = b.clone();
+        bc.merge(&c);
+        let mut a_bc = a.clone();
+        a_bc.merge(&bc);
+
+        assert_eq!(ab_c.get(), a_bc.get());
+    }
+
+    #[test]
+    fn merge_is_idempotent() {
+        let mut a: LWWRegister<i32> = LWWRegister::new("n1");
+        a.set_and_apply(7, 1);
+        let snapshot = a.clone();
+        a.merge(&snapshot);
+        a.merge(&snapshot);
+        assert_eq!(a.get(), Some(&7));
+        assert_eq!(a.timestamp(), Some(1));
+    }
+
+    #[test]
+    fn merge_higher_timestamp_wins() {
+        let mut a: LWWRegister<i32> = LWWRegister::new("n1");
+        let mut b: LWWRegister<i32> = LWWRegister::new("n2");
+        a.set_and_apply(10, 1);
+        b.set_and_apply(20, 5);
+
+        a.merge(&b);
+        assert_eq!(a.get(), Some(&20));
+        assert_eq!(a.timestamp(), Some(5));
     }
 }
