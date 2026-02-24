@@ -162,18 +162,29 @@ export class WebSocketManager {
 
         if (msg.type === 'SNAPSHOT') {
           // Hydrate local store with the server's consolidated state.
-          let snapshotEnvelopes: unknown;
+          // Two snapshot formats are supported:
+          //   1. Rust relay: `data` is a serialised StateStore JSON object →
+          //      call `store.merge_snapshot(data)` for state-based hydration.
+          //   2. TypeScript relay: `data` is a JSON array of envelope strings →
+          //      replay each envelope via `apply_envelope` (legacy / fallback).
+          let snapshotData: unknown;
           try {
-            snapshotEnvelopes = JSON.parse(msg.data);
+            snapshotData = JSON.parse(msg.data);
           } catch {
-            snapshotEnvelopes = [];
+            snapshotData = [];
           }
-          if (Array.isArray(snapshotEnvelopes)) {
-            for (const env of snapshotEnvelopes) {
+          if (Array.isArray(snapshotData)) {
+            for (const env of snapshotData) {
               if (typeof env === 'string') {
                 this._store.apply_envelope(env);
               }
             }
+          } else if (
+            typeof snapshotData === 'object' &&
+            snapshotData !== null &&
+            this._store.merge_snapshot
+          ) {
+            this._store.merge_snapshot(msg.data);
           }
           // Allow outgoing writes now that we hold the server's state.
           this._snapshotReceived = true;

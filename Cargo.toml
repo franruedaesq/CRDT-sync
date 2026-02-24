@@ -9,6 +9,10 @@ keywords = ["crdt", "sync", "distributed", "state", "conflict-free"]
 categories = ["data-structures", "network-programming"]
 readme = "README.md"
 
+[workspace]
+members = ["server-rs"]
+resolver = "2"
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
