@@ -40,6 +40,7 @@ export function RobotDashboard() {
     {
        robot: { speed: 0, active: true } // Initial State
     }
+    // Optionally, you can pass a `{ wasmUrl }` here if your bundler needs it!
   );
 
   if (status === 'connecting') {
@@ -84,15 +85,44 @@ export function RobotDashboard() {
 
 ## API Reference
 
-### `useCrdtState<T>(url: string, initialState: T)`
+### `useCrdtState<T>(url: string, initialState: T, options?: UseCrdtStateOptions)`
 
 Accepts a TypeScript generic `T` that extends `Record<string, unknown>`.
 
 #### Parameters:
 - `url` (`string`): The WebSocket URL to connect to the backend sync service.
 - `initialState` (`T`): The default state to build the proxy structure over. 
+- `options` (`UseCrdtStateOptions`): Configuration options.
+  - `wasmUrl` (`string`, optional): A custom URL to load the `crdt_sync_bg.wasm` file from.
 
 #### Returns (`UseCrdtStateResult<T>`):
 - `state`: The plain Javascript object representation of your state. You should use `state` for reading values when rendering.
 - `proxy`: The `CrdtStateProxy` object. You **must** perform all mutations on `proxy.state`. Mutating `state` directly will not trigger network events.
 - `status`: Connective status indicator (`'connecting'` | `'open'` | `'error'`).
+
+---
+
+## Troubleshooting
+
+### `CompileError: WebAssembly.instantiate(): expected magic word...`
+
+If you are using Vite, Webpack, or a similar modern bundler, your dev server might intercept the internal WebAssembly file request and incorrectly serve your `index.html` fallback instead. 
+
+To resolve this, explicitly load the `.wasm` file using your bundler's native asset import mechanism (e.g., the `?url` suffix in Vite) and supply it to the hook:
+
+```tsx
+import { useCrdtState } from '@crdt-sync/react';
+// 1. Tell Vite to treat the WASM as a static URL asset
+import wasmUrl from '@crdt-sync/core/pkg/web/crdt_sync_bg.wasm?url';
+
+export function App() {
+  const { state } = useCrdtState(
+    'ws://localhost:8080', 
+    { count: 0 }, 
+    // 2. Explicitly provide the URL to the hook
+    { wasmUrl } 
+  );
+
+  return <div>{state.count}</div>;
+}
+```

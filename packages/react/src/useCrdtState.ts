@@ -11,9 +11,14 @@ export interface UseCrdtStateResult<T> {
     status: CrdtStatus;
 }
 
+export interface UseCrdtStateOptions {
+    wasmUrl?: string;
+}
+
 export function useCrdtState<T extends Record<string, unknown>>(
     url: string,
-    initialState: T
+    initialState: T,
+    options?: UseCrdtStateOptions
 ): UseCrdtStateResult<T> {
     const [proxy, setProxy] = useState<CrdtStateProxy | null>(null);
     const [status, setStatus] = useState<CrdtStatus>('connecting');
@@ -29,7 +34,7 @@ export function useCrdtState<T extends Record<string, unknown>>(
 
         async function setup() {
             try {
-                await init();
+                await init(options?.wasmUrl);
                 if (!active) return;
 
                 // Create a unique client ID

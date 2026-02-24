@@ -1,2 +1,2 @@
 export { useCrdtState } from './useCrdtState';
-export type { CrdtStatus, UseCrdtStateResult } from './useCrdtState';
+export type { CrdtStatus, UseCrdtStateResult, UseCrdtStateOptions } from './useCrdtState';
