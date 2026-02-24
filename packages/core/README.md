@@ -1,7 +1,5 @@
 # @crdt-sync/core
 
-The core, framework-agnostic TypeScript SDK for `crdt-sync`. 
-
 It acts as a TypeScript proxy wrapper around the powerful, Rust-compiled WebAssembly (Wasm) `StateStore` engine. It handles initializing the Wasm binaries, orchestrating the state sync via CRDTs, and managing the WebSocket network connections under the hood.
 
 ## Installation
