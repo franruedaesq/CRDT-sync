@@ -192,6 +192,48 @@ describe('CrdtStateProxy – onUpdate event emitter', () => {
   });
 });
 
+// ── get trap ──────────────────────────────────────────────────────────────────
+
+describe('CrdtStateProxy – get trap', () => {
+  test('returns undefined for Symbol keys without crashing', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    expect(() => {
+      const _ = (proxy.state as any)[Symbol.toPrimitive];
+    }).not.toThrow();
+    expect((proxy.state as any)[Symbol.toPrimitive]).toBeUndefined();
+  });
+
+  test('reads a previously written top-level value from the store', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    (proxy.state as Record<string, unknown>).speed = 42;
+
+    expect((proxy.state as Record<string, unknown>).speed).toBe(42);
+  });
+
+  test('reads a previously written nested value from the store', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    (proxy.state as Record<string, Record<string, unknown>>).robot.speed = 99;
+
+    expect((proxy.state as Record<string, Record<string, unknown>>).robot.speed).toBe(99);
+  });
+
+  test('returns a nested proxy for unset keys, stable across accesses', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    const val = (proxy.state as Record<string, unknown>).notYetSet;
+
+    expect(val).toBeDefined();
+    expect(val).toBe((proxy.state as Record<string, unknown>).notYetSet);
+  });
+});
+
 // ── state accessor ────────────────────────────────────────────────────────────
 
 describe('CrdtStateProxy – state accessor', () => {

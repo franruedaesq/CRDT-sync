@@ -1,6 +1,6 @@
 {
   "name": "@crdt-sync/core",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "TypeScript proxy wrapper for the crdt-sync Wasm StateStore",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -10,6 +10,13 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
+    },
+    "./pkg/web/crdt_sync.js": {
+      "types": "./pkg/web/crdt_sync.d.ts",
+      "default": "./pkg/web/crdt_sync.js"
+    },
+    "./pkg/web/*": {
+      "default": "./pkg/web/*"
     }
   },
   "files": [

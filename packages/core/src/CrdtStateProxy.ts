@@ -137,16 +137,24 @@ export class CrdtStateProxy {
     const children: Record<string, Record<string, unknown>> = {};
 
     return new Proxy({} as Record<string, unknown>, {
-      get: (_target, prop: string) => {
-        const key = prefix ? `${prefix}.${prop}` : prop;
+      get: (_target, prop) => {
+        if (typeof prop === 'symbol') return undefined;
+        const key = prefix ? `${prefix}.${String(prop)}` : String(prop);
+
+        const raw = this._store.get_register(key);
+        if (raw !== undefined) {
+          return JSON.parse(raw);
+        }
+
         if (!(prop in children)) {
           children[prop] = this._makeProxy(key);
         }
         return children[prop];
       },
 
-      set: (_target, prop: string, value: unknown) => {
-        const key = prefix ? `${prefix}.${prop}` : prop;
+      set: (_target, prop, value: unknown) => {
+        if (typeof prop === 'symbol') return false;
+        const key = prefix ? `${prefix}.${String(prop)}` : String(prop);
         const envelope = this._store.set_register(key, JSON.stringify(value));
         this._emit({ key, value, envelope });
         return true;
