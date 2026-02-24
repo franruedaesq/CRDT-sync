@@ -200,10 +200,13 @@ function tryPrune(room: Room): void {
     // Tombstones strictly older than minClock can be pruned: every client
     // has already sent an envelope with a timestamp >= minClock, meaning
     // their local store has processed everything up to minClock - 1.
-    const pruneable = room.tombstones.filter((t) => t.ts < minClock);
-    if (pruneable.length === 0) return;
-
-    const maxPruneTs = Math.max(...pruneable.map((t) => t.ts));
+    let maxPruneTs = -Infinity;
+    for (const t of room.tombstones) {
+        if (t.ts < minClock && t.ts > maxPruneTs) {
+            maxPruneTs = t.ts;
+        }
+    }
+    if (!Number.isFinite(maxPruneTs)) return;
 
     const pruneMsg: ServerMessage = { type: 'PRUNE', data: maxPruneTs };
     const pruneBytes = msgpackEncode(pruneMsg);

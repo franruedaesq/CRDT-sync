@@ -192,12 +192,14 @@ impl WasmStateStore {
     }
 
     /// Physically remove tombstoned entries from all CRDTs in this store that
-    /// were deleted at or before `before_ts`.
+    /// were deleted at or before `before_ts` (inclusive upper bound).
     ///
     /// Called in response to a server `PRUNE` broadcast after the server has
     /// determined that all connected clients have advanced their clocks past
     /// `before_ts`, meaning no client can still be "in the middle of" an
-    /// operation that references those deleted entries.
+    /// operation that references those deleted entries.  Specifically, any RGA
+    /// node with `id.clock ≤ before_ts` that has been tombstoned is physically
+    /// removed, and any OR-Set entry with an empty token set is dropped.
     ///
     /// `before_ts` is passed as `f64` because JavaScript's `Number` type
     /// cannot safely represent all `u64` values.

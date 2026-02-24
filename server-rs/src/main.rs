@@ -307,17 +307,12 @@ fn check_and_prune(room: &mut Room) -> Option<Vec<u8>> {
     }
 
     // Tombstones strictly older than min_clock can be pruned.
-    let pruneable: Vec<u64> = room
+    let max_prune_ts = room
         .tombstones
         .iter()
         .filter(|(ts, _, _)| *ts < min_clock)
         .map(|(ts, _, _)| *ts)
-        .collect();
-    if pruneable.is_empty() {
-        return None;
-    }
-
-    let max_prune_ts = *pruneable.iter().max()?;
+        .max()?;
     room.tombstones.retain(|(ts, _, _)| *ts > max_prune_ts);
 
     rmp_serde::to_vec_named(&ServerMessage::Prune(max_prune_ts)).ok()
