@@ -1,0 +1,10 @@
+{
+    "name": "crdt-sync-workspace",
+    "private": true,
+    "scripts": {
+        "build": "npm run build --workspaces --if-present"
+    },
+    "workspaces": [
+        "packages/*"
+    ]
+}

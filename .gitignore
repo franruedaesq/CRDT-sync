@@ -1,4 +1,6 @@
 /target
-/typescript/node_modules
-/typescript/dist
+/node_modules
+/packages/*/node_modules
+/packages/*/dist
+/packages/*/pkg
 /pkg

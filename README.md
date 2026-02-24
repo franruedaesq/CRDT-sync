@@ -291,6 +291,48 @@ without dynamic dispatch.
 
 ---
 
+## TypeScript SDK & React Integration
+
+`crdt-sync` provides a seamless TypeScript monorepo offering a framework-agnostic core (`@crdt-sync/core`) and framework-specific adapters (`@crdt-sync/react`), built on top of WebAssembly.
+
+### Installation
+
+```bash
+npm install @crdt-sync/core @crdt-sync/react
+```
+
+### React usage (`useCrdtState`)
+
+The React hook magically handles Wasm initialization, WebSocket network sync, CRDT proxying, and React component re-renders:
+
+```tsx
+import { useCrdtState } from '@crdt-sync/react';
+
+export function RobotDashboard() {
+  // Binds the CRDT Wasm engine and networking directly to React state
+  const { state, proxy, status } = useCrdtState('wss://api.example.com/sync', {
+    robot: { speed: 0, active: true }
+  });
+
+  if (status !== 'open') return <p>Connecting to sync engine...</p>;
+
+  return (
+    <div>
+      <h1>Speed: {state.robot.speed}</h1>
+      {/* 
+        Direct mutation is intercepted, applied as a CRDT operation, 
+        broadcast over WebSocket, and triggers a local React re-render.
+      */}
+      <button onClick={() => proxy!.state.robot.speed += 10}>
+        Increase Speed
+      </button>
+    </div>
+  );
+}
+```
+
+---
+
 ## Running Tests
 
 ```bash

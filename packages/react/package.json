@@ -1,0 +1,23 @@
+{
+    "name": "@crdt-sync/react",
+    "version": "0.1.0",
+    "description": "React hook adapter for crdt-sync",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc"
+    },
+    "peerDependencies": {
+        "react": ">=16.8",
+        "react-dom": ">=16.8"
+    },
+    "dependencies": {
+        "@crdt-sync/core": "*"
+    },
+    "devDependencies": {
+        "@types/react": "^18.0.0",
+        "@types/react-dom": "^18.0.0",
+        "typescript": "^5.4.5"
+    },
+    "license": "MIT"
+}
