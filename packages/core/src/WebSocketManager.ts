@@ -170,7 +170,9 @@ export class WebSocketManager {
           }
           if (Array.isArray(snapshotEnvelopes)) {
             for (const env of snapshotEnvelopes) {
-              this._store.apply_envelope(env as string);
+              if (typeof env === 'string') {
+                this._store.apply_envelope(env);
+              }
             }
           }
           // Allow outgoing writes now that we hold the server's state.
@@ -190,7 +192,9 @@ export class WebSocketManager {
           }
           if (Array.isArray(updateEnvelopes)) {
             for (const env of updateEnvelopes) {
-              this._store.apply_envelope(env as string);
+              if (typeof env === 'string') {
+                this._store.apply_envelope(env);
+              }
             }
           } else {
             this._store.apply_envelope(msg.data);
@@ -205,7 +209,9 @@ export class WebSocketManager {
       // of envelope strings (batch format).
       if (Array.isArray(parsed)) {
         for (const env of parsed) {
-          this._store.apply_envelope(env as string);
+          if (typeof env === 'string') {
+            this._store.apply_envelope(env);
+          }
         }
       } else {
         this._store.apply_envelope(event.data);

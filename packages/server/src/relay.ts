@@ -94,6 +94,12 @@ interface Room {
     envelopes: string[];
     /** Connected WebSocket clients currently in this room. */
     clients: Set<WebSocket>;
+    /**
+     * In-flight persistence load promise, set while state is being loaded
+     * from the persistence adapter.  Subsequent joiners await the same
+     * promise rather than issuing a second concurrent load.
+     */
+    loading: Promise<void> | null;
 }
 
 // ── RelayOptions / RelayServer ────────────────────────────────────────────────
@@ -159,7 +165,7 @@ export function createRelay(options: RelayOptions = {}): RelayServer {
     function getOrCreateRoom(roomId: string): Room {
         let room = rooms.get(roomId);
         if (!room) {
-            room = { envelopes: [], clients: new Set() };
+            room = { envelopes: [], clients: new Set(), loading: null };
             rooms.set(roomId, room);
         }
         return room;
@@ -181,14 +187,24 @@ export function createRelay(options: RelayOptions = {}): RelayServer {
         const roomId = getRoomId(req.url);
         const room = getOrCreateRoom(roomId);
 
-        // Load persisted state into a fresh room (one-time, on first client).
-        if (persistence && room.clients.size === 0 && room.envelopes.length === 0) {
-            try {
-                const saved = await persistence.load(roomId);
-                if (saved) room.envelopes.push(...saved);
-            } catch {
-                // Persistence errors are non-fatal; proceed with empty state.
-            }
+        // Load persisted state into a fresh room exactly once, even when
+        // multiple clients connect concurrently before the load completes.
+        if (persistence && room.envelopes.length === 0 && room.loading === null) {
+            room.loading = (async () => {
+                try {
+                    const saved = await persistence.load(roomId);
+                    if (saved) room.envelopes.push(...saved);
+                } catch {
+                    // Persistence errors are non-fatal; proceed with empty state.
+                } finally {
+                    room.loading = null;
+                }
+            })();
+        }
+        // If a load is already in progress, wait for it to complete before
+        // sending the snapshot so the new client receives the full state.
+        if (room.loading !== null) {
+            await room.loading;
         }
 
         room.clients.add(socket);
