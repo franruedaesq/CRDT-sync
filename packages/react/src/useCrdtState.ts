@@ -84,8 +84,8 @@ export function useCrdtState<T extends Record<string, unknown>>(
     useEffect(() => {
         if (!proxy) return;
 
-        // Subscribe to proxy updates to trigger React re-renders.
-        return proxy.onUpdate(() => {
+        // Re-render on any state change: local writes and incoming remote updates.
+        return proxy.onChange(() => {
             setTick(t => t + 1);
         });
     }, [proxy]);

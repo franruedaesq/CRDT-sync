@@ -19,7 +19,7 @@ export interface WasmStateStore {
  * through the proxy.
  */
 export interface UpdateEvent {
-  /** Dot-separated key path that was updated (e.g. `"robot.speed"`). */
+  /** The register key that was updated (e.g. `"speed"` or `"robot.speed"`). */
   key: string;
   /** The new JavaScript value. */
   value: unknown;
@@ -35,50 +35,42 @@ export type UpdateHandler = (event: UpdateEvent) => void;
 
 /**
  * A TypeScript proxy wrapper around `WasmStateStore` that gives frontend
- * developers a **magical, object-oriented** experience.
+ * developers a transparent, object-oriented experience.
  *
- * ## How it works
+ * ## Reading state
  *
- * 1. **JS `Proxy` interception** – accessing a nested path on `state` returns
- *    another `Proxy`.  Assigning a value anywhere in the tree intercepts the
- *    write and forwards it to the underlying Wasm store via
- *    `set_register(dotPath, JSON.stringify(value))`.
- *
- * 2. **Wasm call** – the interceptor immediately calls
- *    `WasmStateStore.set_register()` so the CRDT operation is recorded and
- *    returns an `Envelope` JSON string ready for broadcasting.
- *
- * 3. **Event emitter** – every write fires all `onUpdate` listeners with the
- *    full `UpdateEvent` (key, value, envelope), enabling React / Vue and other
- *    UI frameworks to react to state changes.
- *
- * ## Usage
+ * Access any registered key directly on `proxy.state`:
  *
  * ```ts
- * import init, { WasmStateStore } from './crdt_sync.js';
- * import { CrdtStateProxy } from './CrdtStateProxy.js';
+ * proxy.state.speed        // returns the registered value, or undefined
+ * proxy.state["robot.speed"] // dot-path keys via bracket notation
+ * ```
  *
- * await init();
- * const store = new WasmStateStore('node-1');
- * const proxy = new CrdtStateProxy(store);
+ * ## Writing state
  *
- * // Register a listener (e.g. trigger a React re-render).
- * const unsubscribe = proxy.onUpdate(({ key, value, envelope }) => {
- *   console.log(`${key} =`, value);
- *   broadcast(envelope); // send to peers
- * });
+ * Assign any value — primitives, objects, arrays:
  *
- * // Write through the proxy — the interceptor handles everything.
+ * ```ts
  * proxy.state.speed = 100;
- * proxy.state.robot.x = 42;
+ * proxy.state.robot = { x: 10, y: 20 };    // store the whole object
+ * proxy.state["robot.speed"] = 100;         // dot-path key
+ * ```
  *
- * // Clean up when done.
- * unsubscribe();
+ * ## Listening for changes
+ *
+ * - `onUpdate(handler)` — fires on **local** writes with the full `UpdateEvent`
+ *   (key, value, envelope). Used by `WebSocketManager` to collect outgoing envelopes.
+ * - `onChange(handler)` — fires on **any** change: local writes _and_ remote
+ *   `apply_envelope` notifications. Use this in UI frameworks to trigger re-renders.
+ *
+ * ```ts
+ * const unsubscribe = proxy.onChange(() => setTick(t => t + 1));
  * ```
  */
 export class CrdtStateProxy {
   private readonly _store: WasmStateStore;
   private readonly _handlers: Set<UpdateHandler> = new Set();
+  private readonly _changeHandlers: Set<() => void> = new Set();
   private readonly _state: Record<string, unknown>;
 
   /**
@@ -88,7 +80,7 @@ export class CrdtStateProxy {
    */
   constructor(store: WasmStateStore) {
     this._store = store;
-    this._state = this._makeProxy('');
+    this._state = this._makeProxy();
   }
 
   // ── Public API ────────────────────────────────────────────────────────
@@ -96,25 +88,22 @@ export class CrdtStateProxy {
   /**
    * The proxied state object.
    *
-   * Assigning any property (or nested property) on this object will
-   * automatically call `WasmStateStore.set_register` and fire `onUpdate`
-   * listeners.
-   *
-   * ```ts
-   * proxy.state.speed = 100;       // key: "speed"
-   * proxy.state.robot.speed = 100; // key: "robot.speed"
-   * ```
+   * Reading a key returns the registered value, or `undefined` if it has
+   * not been set yet.  Assigning a value calls `WasmStateStore.set_register`
+   * and fires all `onUpdate` and `onChange` listeners.
    */
   get state(): Record<string, unknown> {
     return this._state;
   }
 
   /**
-   * Register a listener that is called whenever a property is written through
-   * `proxy.state`.
+   * Register a listener that fires whenever a value is written through
+   * `proxy.state` (local writes only).
    *
-   * @param handler - Callback receiving an `UpdateEvent`.
-   * @returns An unsubscribe function — call it to remove the listener.
+   * The `UpdateEvent` carries the register key, new value, and the CRDT
+   * envelope — forward the envelope to peers via `apply_envelope`.
+   *
+   * @returns An unsubscribe function.
    */
   onUpdate(handler: UpdateHandler): () => void {
     this._handlers.add(handler);
@@ -123,47 +112,73 @@ export class CrdtStateProxy {
     };
   }
 
+  /**
+   * Register a listener that fires whenever state changes — whether from a
+   * local write or an incoming remote update (after `notifyRemoteUpdate`).
+   *
+   * Use this in UI frameworks to trigger re-renders:
+   *
+   * ```ts
+   * proxy.onChange(() => setTick(t => t + 1));
+   * ```
+   *
+   * @returns An unsubscribe function.
+   */
+  onChange(handler: () => void): () => void {
+    this._changeHandlers.add(handler);
+    return () => {
+      this._changeHandlers.delete(handler);
+    };
+  }
+
+  /**
+   * Notify all `onChange` listeners that remote state has been applied to the
+   * store.  Called by `WebSocketManager` after every `apply_envelope` so that
+   * UI frameworks re-render with the latest state.
+   */
+  notifyRemoteUpdate(): void {
+    this._emitChange();
+  }
+
   // ── Internal helpers ──────────────────────────────────────────────────
 
   /**
-   * Recursively build a `Proxy` for the given dot-path `prefix`.
+   * Build the state `Proxy`.
    *
-   * - **`get` trap**: returns a child proxy for the nested path so that deep
-   *   assignments like `proxy.state.robot.speed = 100` work correctly.
+   * - **`get` trap**: reads the value from the WASM store via `get_register`.
+   *   Returns the parsed value, or `undefined` if the key has not been registered.
    * - **`set` trap**: serialises the value, calls `set_register`, and fires
-   *   all `onUpdate` listeners.
+   *   all `onUpdate` and `onChange` listeners.
+   *
+   * Keys may be dot-separated paths (e.g. `"robot.speed"`) when using bracket
+   * notation: `proxy.state["robot.speed"] = 100`.
    */
-  private _makeProxy(prefix: string): Record<string, unknown> {
-    const children: Record<string, Record<string, unknown>> = {};
-
+  private _makeProxy(): Record<string, unknown> {
     return new Proxy({} as Record<string, unknown>, {
       get: (_target, prop) => {
         if (typeof prop === 'symbol') return undefined;
-        const key = prefix ? `${prefix}.${String(prop)}` : String(prop);
-
-        const raw = this._store.get_register(key);
-        if (raw !== undefined) {
-          return JSON.parse(raw);
-        }
-
-        if (!(prop in children)) {
-          children[prop] = this._makeProxy(key);
-        }
-        return children[prop];
+        const raw = this._store.get_register(String(prop));
+        return raw !== undefined ? JSON.parse(raw) : undefined;
       },
 
       set: (_target, prop, value: unknown) => {
         if (typeof prop === 'symbol') return false;
-        const key = prefix ? `${prefix}.${String(prop)}` : String(prop);
+        const key = String(prop);
         const envelope = this._store.set_register(key, JSON.stringify(value));
         this._emit({ key, value, envelope });
+        this._emitChange();
         return true;
       },
     });
   }
 
-  /** Dispatch an `UpdateEvent` to all registered handlers. */
+  /** Dispatch an `UpdateEvent` to all `onUpdate` handlers. */
   private _emit(event: UpdateEvent): void {
     this._handlers.forEach((handler) => handler(event));
+  }
+
+  /** Notify all `onChange` handlers of a state change. */
+  private _emitChange(): void {
+    this._changeHandlers.forEach((handler) => handler());
   }
 }

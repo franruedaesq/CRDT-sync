@@ -9,25 +9,32 @@ import WS from 'vitest-websocket-mock';
 vi.mock('@crdt-sync/core', () => {
     class MockProxy {
         state: any;
-        callbacks: Set<Function>;
+        changeCallbacks: Set<Function>;
         constructor() {
-            this.callbacks = new Set();
+            this.changeCallbacks = new Set();
             this.state = new Proxy({}, {
                 set: (target: any, prop, value) => {
                     target[prop] = value;
-                    this.callbacks.forEach(cb => cb());
+                    // Local write fires onChange (mirrors real CrdtStateProxy behaviour).
+                    this.changeCallbacks.forEach(cb => cb());
                     return true;
                 }
             });
         }
-        onUpdate(cb: Function) {
-            this.callbacks.add(cb);
-            return () => this.callbacks.delete(cb);
+        onUpdate(_cb: Function) {
+            // WebSocketManager uses this for outgoing envelopes; not needed in tests.
+            return () => {};
         }
-        // Helper to simulate remote CRDT updates without triggering standard DOM events
+        onChange(cb: Function) {
+            this.changeCallbacks.add(cb);
+            return () => this.changeCallbacks.delete(cb);
+        }
+        notifyRemoteUpdate() {
+            this.changeCallbacks.forEach(cb => cb());
+        }
+        // Simulate an incoming remote update — fires onChange, mirroring
+        // what WebSocketManager.notifyRemoteUpdate() does after apply_envelope.
         _simulateRemoteUpdate(newState: any) {
-            // Because our mock proxy traps 'set', Object.assign will trigger updates
-            // exactly like remote syncing would in the real Wasm core.
             Object.assign(this.state, newState);
         }
     }
@@ -249,9 +256,11 @@ describe('useCrdtState Hook', () => {
             unmount();
         });
 
-        it('syncs state properly across multiple component instances', async () => {
-            // To properly test this, we simulate the environment where the proxy instance updates
-            // are broadcasted to multiple active hooks listening.
+        it('each component instance manages its own independent state', async () => {
+            // Each useCrdtState call has its own proxy and WASM store instance.
+            // Cross-client sync happens via the server (WebSocket broadcast) — not
+            // via shared in-process state. This test verifies each component
+            // independently reacts to its own proxy updates.
             let proxyRef1: any = null;
 
             const TestComponent1 = () => {
@@ -278,18 +287,18 @@ describe('useCrdtState Hook', () => {
                 expect(screen.getByTestId('comp2').textContent).toBe('0');
             });
 
-            // Simulate a change from Component 1's proxy simulating Wasm
+            // Simulate a remote update arriving at component 1's proxy.
             act(() => {
                 if (proxyRef1) {
                     proxyRef1._simulateRemoteUpdate({ value: 42 });
                 }
             });
 
-            // Both components should reflect the state update via proxy bindings natively
+            // Only component 1 re-renders — component 2's proxy is independent.
             await waitFor(() => {
                 expect(screen.getByTestId('comp1').textContent).toBe('42');
-                expect(screen.getByTestId('comp2').textContent).toBe('42');
             });
+            expect(screen.getByTestId('comp2').textContent).toBe('0');
 
             unmount1();
             unmount2();

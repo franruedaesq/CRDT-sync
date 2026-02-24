@@ -138,7 +138,7 @@ describe('WebSocketManager – outbound broadcast', () => {
     new WebSocketManager(store, proxy, ws);
 
     ws.simulateOpen();
-    (proxy.state as Record<string, Record<string, unknown>>).robot.speed = 99;
+    (proxy.state as Record<string, unknown>)['robot.speed'] = 99;
     jest.runAllTimers();
 
     const batch = JSON.parse(ws.send.mock.calls[0][0] as string) as string[];

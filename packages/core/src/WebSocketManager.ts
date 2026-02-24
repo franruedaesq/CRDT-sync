@@ -143,6 +143,8 @@ export class WebSocketManager {
         // Fallback: treat the raw frame data as a single envelope string.
         this._store.apply_envelope(event.data);
       }
+      // Notify UI listeners (e.g. React) that remote state has been applied.
+      this._proxy.notifyRemoteUpdate();
     };
 
     // On close or error the subscription stays active so that writes made

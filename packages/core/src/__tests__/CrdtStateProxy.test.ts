@@ -27,21 +27,20 @@ describe('CrdtStateProxy – Wasm call on property write', () => {
     expect(store.set_register).toHaveBeenCalledWith('speed', JSON.stringify(100));
   });
 
-  test('writes a nested property with a dot-separated key', () => {
+  test('writes a dot-path key via bracket notation', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
 
-    (proxy.state as Record<string, Record<string, unknown>>).robot.speed = 100;
+    (proxy.state as Record<string, unknown>)['robot.speed'] = 100;
 
     expect(store.set_register).toHaveBeenCalledWith('robot.speed', JSON.stringify(100));
   });
 
-  test('writes a deeply nested property with a full dot path', () => {
+  test('writes a deeply nested dot-path key via bracket notation', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
 
-    const s = proxy.state as Record<string, Record<string, Record<string, unknown>>>;
-    s.fleet.robot.x = 42;
+    (proxy.state as Record<string, unknown>)['fleet.robot.x'] = 42;
 
     expect(store.set_register).toHaveBeenCalledWith('fleet.robot.x', JSON.stringify(42));
   });
@@ -71,6 +70,54 @@ describe('CrdtStateProxy – Wasm call on property write', () => {
     (proxy.state as Record<string, unknown>).config = { retry: 3 };
 
     expect(store.set_register).toHaveBeenCalledWith('config', JSON.stringify({ retry: 3 }));
+  });
+});
+
+// ── get trap ──────────────────────────────────────────────────────────────────
+
+describe('CrdtStateProxy – get trap', () => {
+  test('returns undefined for Symbol keys without crashing', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    expect(() => {
+      const _ = (proxy.state as any)[Symbol.toPrimitive];
+    }).not.toThrow();
+    expect((proxy.state as any)[Symbol.toPrimitive]).toBeUndefined();
+  });
+
+  test('returns undefined for an unregistered key', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    expect((proxy.state as Record<string, unknown>).notYetSet).toBeUndefined();
+  });
+
+  test('reads a previously written top-level value from the store', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    (proxy.state as Record<string, unknown>).speed = 42;
+
+    expect((proxy.state as Record<string, unknown>).speed).toBe(42);
+  });
+
+  test('reads a dot-path value written via bracket notation', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    (proxy.state as Record<string, unknown>)['robot.speed'] = 99;
+
+    expect((proxy.state as Record<string, unknown>)['robot.speed']).toBe(99);
+  });
+
+  test('reads an object value written as a whole', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+
+    (proxy.state as Record<string, unknown>).robot = { x: 10, y: 20 };
+
+    expect((proxy.state as Record<string, unknown>).robot).toEqual({ x: 10, y: 20 });
   });
 });
 
@@ -112,13 +159,13 @@ describe('CrdtStateProxy – onUpdate event emitter', () => {
     expect(events[0].envelope).toBe(expectedEnvelope);
   });
 
-  test('fires onUpdate with dot-separated key for nested writes', () => {
+  test('fires onUpdate with dot-path key for bracket-notation writes', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
     const events: UpdateEvent[] = [];
 
     proxy.onUpdate((e) => events.push(e));
-    (proxy.state as Record<string, Record<string, unknown>>).robot.speed = 100;
+    (proxy.state as Record<string, unknown>)['robot.speed'] = 100;
 
     expect(events[0].key).toBe('robot.speed');
     expect(events[0].value).toBe(100);
@@ -192,45 +239,56 @@ describe('CrdtStateProxy – onUpdate event emitter', () => {
   });
 });
 
-// ── get trap ──────────────────────────────────────────────────────────────────
+// ── onChange event emitter ────────────────────────────────────────────────────
 
-describe('CrdtStateProxy – get trap', () => {
-  test('returns undefined for Symbol keys without crashing', () => {
+describe('CrdtStateProxy – onChange event emitter', () => {
+  test('fires onChange on local write', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
+    const handler = jest.fn();
 
-    expect(() => {
-      const _ = (proxy.state as any)[Symbol.toPrimitive];
-    }).not.toThrow();
-    expect((proxy.state as any)[Symbol.toPrimitive]).toBeUndefined();
+    proxy.onChange(handler);
+    (proxy.state as Record<string, unknown>).x = 1;
+
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 
-  test('reads a previously written top-level value from the store', () => {
+  test('fires onChange after notifyRemoteUpdate', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
+    const handler = jest.fn();
 
-    (proxy.state as Record<string, unknown>).speed = 42;
+    proxy.onChange(handler);
+    proxy.notifyRemoteUpdate();
 
-    expect((proxy.state as Record<string, unknown>).speed).toBe(42);
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 
-  test('reads a previously written nested value from the store', () => {
+  test('does not fire onUpdate on notifyRemoteUpdate', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
+    const updateHandler = jest.fn();
+    const changeHandler = jest.fn();
 
-    (proxy.state as Record<string, Record<string, unknown>>).robot.speed = 99;
+    proxy.onUpdate(updateHandler);
+    proxy.onChange(changeHandler);
+    proxy.notifyRemoteUpdate();
 
-    expect((proxy.state as Record<string, Record<string, unknown>>).robot.speed).toBe(99);
+    expect(updateHandler).not.toHaveBeenCalled();
+    expect(changeHandler).toHaveBeenCalledTimes(1);
   });
 
-  test('returns a nested proxy for unset keys, stable across accesses', () => {
+  test('onChange unsubscribe works correctly', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
+    const handler = jest.fn();
 
-    const val = (proxy.state as Record<string, unknown>).notYetSet;
+    const unsubscribe = proxy.onChange(handler);
+    unsubscribe();
+    (proxy.state as Record<string, unknown>).x = 1;
+    proxy.notifyRemoteUpdate();
 
-    expect(val).toBeDefined();
-    expect(val).toBe((proxy.state as Record<string, unknown>).notYetSet);
+    expect(handler).not.toHaveBeenCalled();
   });
 });
 
@@ -242,15 +300,5 @@ describe('CrdtStateProxy – state accessor', () => {
     const proxy = new CrdtStateProxy(store);
 
     expect(proxy.state).toBe(proxy.state);
-  });
-
-  test('nested child proxies are stable across multiple accesses', () => {
-    const store = makeStore();
-    const proxy = new CrdtStateProxy(store);
-
-    const robot1 = (proxy.state as Record<string, unknown>).robot;
-    const robot2 = (proxy.state as Record<string, unknown>).robot;
-
-    expect(robot1).toBe(robot2);
   });
 });
