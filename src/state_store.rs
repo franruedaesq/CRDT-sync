@@ -279,6 +279,27 @@ impl StateStore {
         crate::proxy::StateProxy::new(self)
     }
 
+    // ── Pruning ───────────────────────────────────────────────────────────
+
+    /// Physically remove tombstoned entries from all CRDTs in this store.
+    ///
+    /// Called after the server broadcasts a `PRUNE` message to reclaim memory
+    /// occupied by logically-deleted elements whose deletion has been observed
+    /// by every connected client (i.e. no client clock lags behind `before_ts`).
+    ///
+    /// - **RGA sequences**: nodes whose `id.clock ≤ before_ts` and `deleted ==
+    ///   true` are dropped from the internal node list.
+    /// - **OR-Sets**: entries whose token set is empty are removed (they were
+    ///   fully removed via observe-remove and are safe to forget).
+    pub fn prune_tombstones(&mut self, before_ts: u64) {
+        for seq in self.sequences.values_mut() {
+            seq.prune_tombstones(before_ts);
+        }
+        for set in self.sets.values_mut() {
+            set.prune_empties();
+        }
+    }
+
     // ── Apply remote envelopes ────────────────────────────────────────────
 
     /// Apply an [`Envelope`] received from a remote node.

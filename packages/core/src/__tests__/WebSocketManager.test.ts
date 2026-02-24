@@ -1,3 +1,4 @@
+import { encode as msgpackEncode, decode as msgpackDecode } from '@msgpack/msgpack';
 import { CrdtStateProxy, WasmStateStore } from '../CrdtStateProxy';
 import { WebSocketManager, WebSocketLike } from '../WebSocketManager';
 
@@ -8,7 +9,7 @@ function makeStore(): jest.Mocked<WasmStateStore> {
   return {
     set_register: jest.fn((key: string, value_json: string) => {
       store[key] = value_json;
-      return JSON.stringify({ timestamp: 1, node_id: 'node-1', op: { kind: 'Register', key, op: { value: JSON.parse(value_json), timestamp: 1, node_id: 'node-1' } } });
+      return msgpackEncode({ timestamp: 1, node_id: 'node-1', op: { kind: 'Register', key, op: { value: JSON.parse(value_json), timestamp: 1, node_id: 'node-1' } } });
     }),
     get_register: jest.fn((key: string) => store[key]),
     apply_envelope: jest.fn(),
@@ -21,12 +22,12 @@ interface MockWebSocket extends WebSocketLike {
   close: jest.Mock;
   /** Helper: simulate the connection opening. */
   simulateOpen(): void;
-  /** Helper: simulate a SNAPSHOT message from the server. */
-  simulateSnapshot(envelopes: string[]): void;
-  /** Helper: simulate an UPDATE message from the server. */
-  simulateUpdate(batch: string): void;
-  /** Helper: simulate a raw message arriving (legacy format). */
-  simulateMessage(data: string): void;
+  /** Helper: simulate a SNAPSHOT message from the server (binary). */
+  simulateSnapshot(envelopes: Uint8Array[]): void;
+  /** Helper: simulate an UPDATE message from the server (binary). */
+  simulateUpdate(envelopes: Uint8Array[]): void;
+  /** Helper: simulate a PRUNE message from the server (binary). */
+  simulatePrune(beforeTs: number): void;
   /** Helper: simulate the connection closing. */
   simulateClose(): void;
   /** Helper: simulate an error on the connection. */
@@ -46,14 +47,17 @@ function makeWebSocket(): MockWebSocket {
       ws.readyState = 1; // OPEN
       ws.onopen?.({});
     },
-    simulateSnapshot(envelopes: string[]) {
-      ws.onmessage?.({ data: JSON.stringify({ type: 'SNAPSHOT', data: JSON.stringify(envelopes) }) });
+    simulateSnapshot(envelopes: Uint8Array[]) {
+      const bytes = msgpackEncode({ type: 'SNAPSHOT', data: envelopes });
+      ws.onmessage?.({ data: bytes });
     },
-    simulateUpdate(batch: string) {
-      ws.onmessage?.({ data: JSON.stringify({ type: 'UPDATE', data: batch }) });
+    simulateUpdate(envelopes: Uint8Array[]) {
+      const bytes = msgpackEncode({ type: 'UPDATE', data: envelopes });
+      ws.onmessage?.({ data: bytes });
     },
-    simulateMessage(data: string) {
-      ws.onmessage?.({ data });
+    simulatePrune(beforeTs: number) {
+      const bytes = msgpackEncode({ type: 'PRUNE', data: beforeTs });
+      ws.onmessage?.({ data: bytes });
     },
     simulateClose() {
       ws.readyState = 3; // CLOSED
@@ -65,6 +69,15 @@ function makeWebSocket(): MockWebSocket {
     },
   };
   return ws;
+}
+
+// Helper: decode a binary batch sent via ws.send and return the array of decoded envelopes.
+function decodeSentBatch(callArg: unknown): Record<string, unknown>[] {
+  const bytes = callArg instanceof ArrayBuffer
+    ? new Uint8Array(callArg)
+    : callArg as Uint8Array;
+  const envelopeBlobs = msgpackDecode(bytes) as Uint8Array[];
+  return envelopeBlobs.map((b) => msgpackDecode(b) as Record<string, unknown>);
 }
 
 // ── Outbound: local writes are broadcast over WebSocket ───────────────────────
@@ -85,11 +98,10 @@ describe('WebSocketManager – outbound broadcast', () => {
     jest.runAllTimers();
 
     expect(ws.send).toHaveBeenCalledTimes(1);
-    // The payload is a JSON array of envelope strings.
-    const batch = JSON.parse(ws.send.mock.calls[0][0] as string) as string[];
-    expect(batch).toHaveLength(1);
-    const parsed = JSON.parse(batch[0]) as Record<string, unknown>;
-    expect(parsed).toMatchObject({ op: { key: 'x' } });
+    // The payload is a MessagePack-encoded array of envelope blobs.
+    const envelopes = decodeSentBatch(ws.send.mock.calls[0][0]);
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0]).toMatchObject({ op: { key: 'x' } });
   });
 
   test('does not send before the connection is open', () => {
@@ -132,8 +144,8 @@ describe('WebSocketManager – outbound broadcast', () => {
 
     // All three writes are coalesced into one send call.
     expect(ws.send).toHaveBeenCalledTimes(1);
-    const batch = JSON.parse(ws.send.mock.calls[0][0] as string) as string[];
-    expect(batch).toHaveLength(3);
+    const envelopes = decodeSentBatch(ws.send.mock.calls[0][0]);
+    expect(envelopes).toHaveLength(3);
   });
 
   test('sends separate batches for writes in separate frames', () => {
@@ -151,10 +163,10 @@ describe('WebSocketManager – outbound broadcast', () => {
     jest.runAllTimers(); // flush second frame
 
     expect(ws.send).toHaveBeenCalledTimes(2);
-    const batch1 = JSON.parse(ws.send.mock.calls[0][0] as string) as string[];
-    const batch2 = JSON.parse(ws.send.mock.calls[1][0] as string) as string[];
-    expect(JSON.parse(batch1[0])).toMatchObject({ op: { key: 'a' } });
-    expect(JSON.parse(batch2[0])).toMatchObject({ op: { key: 'b' } });
+    const envelopes1 = decodeSentBatch(ws.send.mock.calls[0][0]);
+    const envelopes2 = decodeSentBatch(ws.send.mock.calls[1][0]);
+    expect(envelopes1[0]).toMatchObject({ op: { key: 'a' } });
+    expect(envelopes2[0]).toMatchObject({ op: { key: 'b' } });
   });
 
   test('sends the envelope for nested property writes', () => {
@@ -168,9 +180,8 @@ describe('WebSocketManager – outbound broadcast', () => {
     (proxy.state as Record<string, unknown>)['robot.speed'] = 99;
     jest.runAllTimers();
 
-    const batch = JSON.parse(ws.send.mock.calls[0][0] as string) as string[];
-    const parsed = JSON.parse(batch[0]) as Record<string, unknown>;
-    expect(parsed).toMatchObject({ op: { key: 'robot.speed' } });
+    const envelopes = decodeSentBatch(ws.send.mock.calls[0][0]);
+    expect(envelopes[0]).toMatchObject({ op: { key: 'robot.speed' } });
   });
 
   test('stops broadcasting after disconnect', () => {
@@ -228,8 +239,8 @@ describe('WebSocketManager – inbound SNAPSHOT', () => {
     const ws = makeWebSocket();
     new WebSocketManager(store, proxy, ws);
 
-    const env1 = JSON.stringify({ timestamp: 1, node_id: 'n1', op: { kind: 'Register', key: 'a', op: {} } });
-    const env2 = JSON.stringify({ timestamp: 2, node_id: 'n2', op: { kind: 'Register', key: 'b', op: {} } });
+    const env1 = msgpackEncode({ timestamp: 1, node_id: 'n1', op: { kind: 'Register', key: 'a', op: {} } });
+    const env2 = msgpackEncode({ timestamp: 2, node_id: 'n2', op: { kind: 'Register', key: 'b', op: {} } });
     ws.simulateOpen();
     ws.simulateSnapshot([env1, env2]);
 
@@ -264,7 +275,7 @@ describe('WebSocketManager – inbound SNAPSHOT', () => {
     const ws = makeWebSocket();
     new WebSocketManager(store, proxy, ws);
 
-    const stateStoreJson = JSON.stringify({
+    const stateStoreBytes = msgpackEncode({
       node_id: 'server',
       clock: { time: 3 },
       registers: { 'robot.x': { node_id: 'server', state: [42, 3, 'server'] } },
@@ -272,11 +283,12 @@ describe('WebSocketManager – inbound SNAPSHOT', () => {
       sequences: {},
     });
     ws.simulateOpen();
-    // Simulate a SNAPSHOT whose data is a serialised StateStore object
-    ws.onmessage?.({ data: JSON.stringify({ type: 'SNAPSHOT', data: stateStoreJson }) });
+    // Simulate a SNAPSHOT whose data is a single Uint8Array (Rust relay StateStore)
+    const snapshotBytes = msgpackEncode({ type: 'SNAPSHOT', data: stateStoreBytes });
+    ws.onmessage?.({ data: snapshotBytes });
 
     expect(store.merge_snapshot).toHaveBeenCalledTimes(1);
-    expect(store.merge_snapshot).toHaveBeenCalledWith(stateStoreJson);
+    expect(store.merge_snapshot).toHaveBeenCalledWith(stateStoreBytes);
     expect(store.apply_envelope).not.toHaveBeenCalled();
   });
 
@@ -287,10 +299,11 @@ describe('WebSocketManager – inbound SNAPSHOT', () => {
     const ws = makeWebSocket();
     new WebSocketManager(store, proxy, ws);
 
-    const stateStoreJson = JSON.stringify({ node_id: 'server', clock: { time: 0 }, registers: {}, sets: {}, sequences: {} });
+    const stateStoreBytes = msgpackEncode({ node_id: 'server', clock: { time: 0 }, registers: {}, sets: {}, sequences: {} });
     ws.simulateOpen();
     expect(() => {
-      ws.onmessage?.({ data: JSON.stringify({ type: 'SNAPSHOT', data: stateStoreJson }) });
+      const snapshotBytes = msgpackEncode({ type: 'SNAPSHOT', data: stateStoreBytes });
+      ws.onmessage?.({ data: snapshotBytes });
     }).not.toThrow();
     expect(store.apply_envelope).not.toHaveBeenCalled();
   });
@@ -303,9 +316,10 @@ describe('WebSocketManager – inbound SNAPSHOT', () => {
     const ws = makeWebSocket();
     new WebSocketManager(store, proxy, ws);
 
-    const stateStoreJson = JSON.stringify({ node_id: 'server', clock: { time: 0 }, registers: {}, sets: {}, sequences: {} });
+    const stateStoreBytes = msgpackEncode({ node_id: 'server', clock: { time: 0 }, registers: {}, sets: {}, sequences: {} });
     ws.simulateOpen();
-    ws.onmessage?.({ data: JSON.stringify({ type: 'SNAPSHOT', data: stateStoreJson }) });
+    const snapshotBytes = msgpackEncode({ type: 'SNAPSHOT', data: stateStoreBytes });
+    ws.onmessage?.({ data: snapshotBytes });
 
     (proxy.state as Record<string, unknown>).x = 7;
     jest.runAllTimers();
@@ -321,9 +335,9 @@ describe('WebSocketManager – inbound UPDATE', () => {
     const ws = makeWebSocket();
     new WebSocketManager(store, proxy, ws);
 
-    const env1 = JSON.stringify({ timestamp: 1, node_id: 'n2', op: { kind: 'Register', key: 'a', op: {} } });
-    const env2 = JSON.stringify({ timestamp: 2, node_id: 'n2', op: { kind: 'Register', key: 'b', op: {} } });
-    ws.simulateUpdate(JSON.stringify([env1, env2]));
+    const env1 = msgpackEncode({ timestamp: 1, node_id: 'n2', op: { kind: 'Register', key: 'a', op: {} } });
+    const env2 = msgpackEncode({ timestamp: 2, node_id: 'n2', op: { kind: 'Register', key: 'b', op: {} } });
+    ws.simulateUpdate([env1, env2]);
 
     expect(store.apply_envelope).toHaveBeenCalledTimes(2);
     expect(store.apply_envelope).toHaveBeenNthCalledWith(1, env1);
@@ -331,58 +345,29 @@ describe('WebSocketManager – inbound UPDATE', () => {
   });
 });
 
-// ── Inbound: peer envelopes are applied to the local store (legacy format) ───
+// ── Inbound: PRUNE message calls prune_tombstones ────────────────────────────
 
-describe('WebSocketManager – inbound apply (legacy format)', () => {
-  test('calls apply_envelope with the raw message data for a single-envelope frame', () => {
+describe('WebSocketManager – inbound PRUNE', () => {
+  test('calls prune_tombstones with the before_ts from the PRUNE message', () => {
     const store = makeStore();
+    store.prune_tombstones = jest.fn();
     const proxy = new CrdtStateProxy(store);
     const ws = makeWebSocket();
     new WebSocketManager(store, proxy, ws);
 
-    const envelope = JSON.stringify({ timestamp: 2, node_id: 'node-2', op: { kind: 'Register', key: 'y', op: { value: 7, timestamp: 2, node_id: 'node-2' } } });
-    ws.simulateMessage(envelope);
+    ws.simulatePrune(42);
 
-    expect(store.apply_envelope).toHaveBeenCalledWith(envelope);
+    expect(store.prune_tombstones).toHaveBeenCalledTimes(1);
+    expect(store.prune_tombstones).toHaveBeenCalledWith(42);
   });
 
-  test('applies each envelope in a batch message', () => {
-    const store = makeStore();
+  test('does not throw when store does not support prune_tombstones', () => {
+    const store = makeStore(); // no prune_tombstones
     const proxy = new CrdtStateProxy(store);
     const ws = makeWebSocket();
     new WebSocketManager(store, proxy, ws);
 
-    const env1 = JSON.stringify({ timestamp: 1, node_id: 'node-2', op: { kind: 'Register', key: 'a', op: {} } });
-    const env2 = JSON.stringify({ timestamp: 2, node_id: 'node-2', op: { kind: 'Register', key: 'b', op: {} } });
-    ws.simulateMessage(JSON.stringify([env1, env2]));
-
-    expect(store.apply_envelope).toHaveBeenCalledTimes(2);
-    expect(store.apply_envelope).toHaveBeenNthCalledWith(1, env1);
-    expect(store.apply_envelope).toHaveBeenNthCalledWith(2, env2);
-  });
-
-  test('applies multiple incoming envelopes in order', () => {
-    const store = makeStore();
-    const proxy = new CrdtStateProxy(store);
-    const ws = makeWebSocket();
-    new WebSocketManager(store, proxy, ws);
-
-    ws.simulateMessage('env-1');
-    ws.simulateMessage('env-2');
-
-    expect(store.apply_envelope).toHaveBeenNthCalledWith(1, 'env-1');
-    expect(store.apply_envelope).toHaveBeenNthCalledWith(2, 'env-2');
-  });
-
-  test('applies incoming envelopes regardless of connection open state', () => {
-    const store = makeStore();
-    const proxy = new CrdtStateProxy(store);
-    const ws = makeWebSocket(); // no simulateOpen
-    new WebSocketManager(store, proxy, ws);
-
-    ws.simulateMessage('any-envelope');
-
-    expect(store.apply_envelope).toHaveBeenCalledWith('any-envelope');
+    expect(() => ws.simulatePrune(10)).not.toThrow();
   });
 });
 
@@ -442,10 +427,10 @@ describe('WebSocketManager – offline buffering', () => {
 
     ws.simulateSnapshot([]); // snapshot received → flush offline queue
     expect(ws.send).toHaveBeenCalledTimes(1);
-    const batch = JSON.parse(ws.send.mock.calls[0][0] as string) as string[];
-    expect(batch).toHaveLength(2);
-    expect(JSON.parse(batch[0])).toMatchObject({ op: { key: 'x' } });
-    expect(JSON.parse(batch[1])).toMatchObject({ op: { key: 'y' } });
+    const envelopes = decodeSentBatch(ws.send.mock.calls[0][0]);
+    expect(envelopes).toHaveLength(2);
+    expect(envelopes[0]).toMatchObject({ op: { key: 'x' } });
+    expect(envelopes[1]).toMatchObject({ op: { key: 'y' } });
   });
 
   test('buffers envelopes written before the first connection opens', () => {
@@ -462,9 +447,9 @@ describe('WebSocketManager – offline buffering', () => {
 
     ws.simulateSnapshot([]); // snapshot received → flush offline queue
     expect(ws.send).toHaveBeenCalledTimes(1);
-    const batch = JSON.parse(ws.send.mock.calls[0][0] as string) as string[];
-    expect(batch).toHaveLength(1);
-    expect(JSON.parse(batch[0])).toMatchObject({ op: { key: 'a' } });
+    const envelopes = decodeSentBatch(ws.send.mock.calls[0][0]);
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0]).toMatchObject({ op: { key: 'a' } });
   });
 
   test('buffers envelopes written after a WebSocket error and flushes on reconnect+snapshot', () => {
@@ -485,9 +470,9 @@ describe('WebSocketManager – offline buffering', () => {
     ws.simulateOpen(); // reconnect, waiting for snapshot
     ws.simulateSnapshot([]); // snapshot received → flush offline queue
     expect(ws.send).toHaveBeenCalledTimes(1);
-    const batch = JSON.parse(ws.send.mock.calls[0][0] as string) as string[];
-    expect(batch).toHaveLength(1);
-    expect(JSON.parse(batch[0])).toMatchObject({ op: { key: 'z' } });
+    const envelopes = decodeSentBatch(ws.send.mock.calls[0][0]);
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0]).toMatchObject({ op: { key: 'z' } });
   });
 
   test('discards the offline buffer when disconnect is called', () => {
@@ -531,8 +516,8 @@ describe('WebSocketManager – offline buffering', () => {
     (proxy.state as Record<string, unknown>).n = 5;
     jest.runAllTimers();
     expect(ws.send).toHaveBeenCalledTimes(1);
-    const batch = JSON.parse(ws.send.mock.calls[0][0] as string) as string[];
-    expect(batch).toHaveLength(1);
-    expect(JSON.parse(batch[0])).toMatchObject({ op: { key: 'n' } });
+    const envelopes = decodeSentBatch(ws.send.mock.calls[0][0]);
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0]).toMatchObject({ op: { key: 'n' } });
   });
 });

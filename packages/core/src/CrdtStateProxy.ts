@@ -6,18 +6,27 @@
  * In tests the interface can be satisfied by any mock object.
  */
 export interface WasmStateStore {
-  /** Write a JSON-encoded value to the named LWW register. Returns the Envelope JSON. */
-  set_register(key: string, value_json: string): string;
+  /**
+   * Write a JSON-encoded value to the named LWW register.
+   * Returns the Envelope as **MessagePack bytes** (`Uint8Array`).
+   */
+  set_register(key: string, value_json: string): Uint8Array;
   /** Read the current value of a named LWW register as a JSON string, or `undefined`. */
   get_register(key: string): string | undefined;
-  /** Apply a remote Envelope (serialised as JSON) to this store. */
-  apply_envelope(envelope_json: string): void;
+  /** Apply a remote Envelope (serialised as **MessagePack bytes**) to this store. */
+  apply_envelope(envelope_bytes: Uint8Array): void;
   /**
-   * Merge a full server-state snapshot (serialised `StateStore` JSON) into this store.
-   * Called by `WebSocketManager` when the server sends a `SNAPSHOT` whose `data`
-   * field is a serialised `StateStore` (Rust relay format) rather than an envelope array.
+   * Merge a full server-state snapshot (serialised `StateStore` as MessagePack bytes)
+   * into this store.  Called by `WebSocketManager` when the server sends a `SNAPSHOT`
+   * whose `data` field is a serialised `StateStore` (Rust relay format) rather than
+   * an envelope array.
    */
-  merge_snapshot?(state_json: string): void;
+  merge_snapshot?(state_bytes: Uint8Array): void;
+  /**
+   * Physically remove tombstoned entries from all CRDTs that were deleted at or
+   * before `before_ts`.  Called in response to a server `PRUNE` broadcast.
+   */
+  prune_tombstones?(before_ts: number): void;
 }
 
 /**
@@ -31,9 +40,10 @@ export interface UpdateEvent {
   value: unknown;
   /**
    * The CRDT Envelope returned by `WasmStateStore.set_register`, serialised
-   * as a JSON string.  Broadcast this to peer nodes via `apply_envelope`.
+   * as **MessagePack bytes** (`Uint8Array`).  Broadcast this to peer nodes
+   * via `apply_envelope`.
    */
-  envelope: string;
+  envelope: Uint8Array;
 }
 
 /** Callback type for `onUpdate` listeners. */

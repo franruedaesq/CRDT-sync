@@ -8,17 +8,20 @@
 //! [`StateStore`] instance on the server.  State from different rooms never
 //! bleeds across room boundaries.
 //!
-//! ## Protocol (server → client)
+//! ## Protocol (server → client) — binary MessagePack frames
 //!
-//! - `{ "type": "SNAPSHOT", "data": "<StateStore JSON>" }` — sent once to every
-//!   newly connected client so it can hydrate from the authoritative server state
-//!   using `WasmStateStore.merge_snapshot()`.
-//! - `{ "type": "UPDATE", "data": "<envelope batch JSON>" }` — forwarded to every
+//! - `{ "type": "SNAPSHOT", "data": <MessagePack-encoded StateStore bytes> }` —
+//!   sent once to every newly connected client so it can hydrate from the
+//!   authoritative server state using `WasmStateStore.merge_snapshot()`.
+//! - `{ "type": "UPDATE", "data": <Uint8Array[]> }` — forwarded to every
 //!   *other* client in the room whenever a client submits new envelopes.
+//! - `{ "type": "PRUNE", "data": <Lamport timestamp number> }` — broadcast
+//!   when all clients have advanced past a tombstone's timestamp, so each
+//!   replica can erase dead memory.
 //!
-//! ## Protocol (client → server)
+//! ## Protocol (client → server) — binary MessagePack frames
 //!
-//! A JSON array of envelope strings, e.g. `["<env1>", "<env2>"]`.
+//! A MessagePack-encoded array of envelope blobs (`Uint8Array[]`).
 //!
 //! ## Usage
 //!
@@ -45,8 +48,25 @@ use axum::{
 };
 use crdt_sync::state_store::{Envelope, StateStore};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::json;
+use serde::Serialize;
 use tokio::sync::{mpsc, Mutex};
+
+// ── Server message types ──────────────────────────────────────────────────────
+
+/// Messages sent from the server to clients (before MessagePack encoding).
+#[derive(Serialize)]
+#[serde(tag = "type", content = "data")]
+enum ServerMessage<'a> {
+    /// Full state snapshot as MessagePack-encoded [`StateStore`] bytes.
+    #[serde(rename = "SNAPSHOT")]
+    Snapshot(&'a [u8]),
+    /// Batch of envelope blobs forwarded from a peer.
+    #[serde(rename = "UPDATE")]
+    Update(Vec<Vec<u8>>),
+    /// Prune tombstones up to and including this Lamport timestamp.
+    #[serde(rename = "PRUNE")]
+    Prune(u64),
+}
 
 // ── Room ──────────────────────────────────────────────────────────────────────
 
@@ -55,7 +75,13 @@ struct Room {
     /// The authoritative CRDT state for this room.
     store: StateStore,
     /// Active client connections: client_id → sender for UPDATE messages.
-    clients: HashMap<u64, mpsc::Sender<String>>,
+    clients: HashMap<u64, mpsc::Sender<Vec<u8>>>,
+    /// Maximum Lamport timestamp received per client (for GC / pruning).
+    client_clocks: HashMap<u64, u64>,
+    /// Tombstones waiting to be pruned: (Lamport ts, kind, key).
+    tombstones: Vec<(u64, &'static str, String)>,
+    /// Room-wide high-watermark timestamp.
+    high_watermark: u64,
 }
 
 /// Shared map of all live rooms.
@@ -108,33 +134,42 @@ async fn ws_handler(
 
 async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms) {
     let client_id = next_client_id();
-    let (client_tx, mut client_rx) = mpsc::channel::<String>(64);
+    let (client_tx, mut client_rx) = mpsc::channel::<Vec<u8>>(64);
 
     // ── Register client & build snapshot ─────────────────────────────────────
-    let snapshot_json = {
+    let snapshot_bytes = {
         let mut map = rooms.lock().await;
         let room = map.entry(room_id.clone()).or_insert_with(|| Room {
             store: StateStore::new("server"),
             clients: HashMap::new(),
+            client_clocks: HashMap::new(),
+            tombstones: Vec::new(),
+            high_watermark: 0,
         });
         room.clients.insert(client_id, client_tx);
-        serde_json::to_string(&room.store).expect("StateStore must be serialisable")
-    };
+        // Seed new client's clock at the room high-watermark.
+        room.client_clocks.insert(client_id, room.high_watermark);
 
-    let snapshot_msg = json!({ "type": "SNAPSHOT", "data": snapshot_json }).to_string();
+        // Serialise the full StateStore as MessagePack bytes (the `data` field).
+        let store_bytes = rmp_serde::to_vec_named(&room.store)
+            .expect("StateStore must be serialisable");
+        // Wrap in { type: "SNAPSHOT", data: <bytes> }.
+        rmp_serde::to_vec_named(&ServerMessage::Snapshot(&store_bytes))
+            .expect("ServerMessage must be serialisable")
+    };
 
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // ── Send SNAPSHOT to the new joiner ───────────────────────────────────────
-    if ws_sender.send(Message::Text(snapshot_msg.into())).await.is_err() {
+    if ws_sender.send(Message::Binary(snapshot_bytes.into())).await.is_err() {
         cleanup(&rooms, &room_id, client_id).await;
         return;
     }
 
-    // ── Task: forward UPDATE messages from the mpsc channel → WS ─────────────
+    // ── Task: forward UPDATE/PRUNE messages from the mpsc channel → WS ───────
     let mut send_task = tokio::spawn(async move {
-        while let Some(msg) = client_rx.recv().await {
-            if ws_sender.send(Message::Text(msg.into())).await.is_err() {
+        while let Some(bytes) = client_rx.recv().await {
+            if ws_sender.send(Message::Binary(bytes.into())).await.is_err() {
                 break;
             }
         }
@@ -145,47 +180,93 @@ async fn handle_socket(socket: WebSocket, room_id: String, rooms: Rooms) {
     let room_id2 = room_id.clone();
     let mut recv_task = tokio::spawn(async move {
         while let Some(result) = ws_receiver.next().await {
-            let text = match result {
-                Ok(Message::Text(t)) => t.to_string(),
+            let bytes = match result {
+                Ok(Message::Binary(b)) => b,
                 Ok(Message::Close(_)) | Err(_) => break,
                 _ => continue,
             };
 
-            // Validate: must be a JSON array.
-            let parsed = match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(v) if v.is_array() => v,
-                _ => continue,
+            // Decode outer frame: expected to be a Vec<Vec<u8>> (array of blobs).
+            let blobs: Vec<Vec<u8>> = match rmp_serde::from_slice::<Vec<Vec<u8>>>(&bytes) {
+                Ok(v) => v,
+                Err(_) => continue,
             };
 
             // Apply envelopes & collect peer senders (brief lock).
-            let (update_msg, peer_senders) = {
+            let (update_bytes_opt, peer_senders, prune_bytes_opt) = {
                 let mut map = rooms2.lock().await;
                 let Some(room) = map.get_mut(&room_id2) else {
                     break;
                 };
 
-                // Apply each envelope to the server's authoritative store.
-                for env_val in parsed.as_array().unwrap() {
-                    if let Some(env_str) = env_val.as_str() {
-                        if let Ok(env) = serde_json::from_str::<Envelope>(env_str) {
-                            room.store.apply_envelope(env);
+                let mut max_ts_in_batch: u64 = 0;
+
+                for blob in &blobs {
+                    if let Ok(env) = rmp_serde::from_slice::<Envelope>(blob) {
+                        let ts = env.timestamp;
+                        if ts > max_ts_in_batch {
+                            max_ts_in_batch = ts;
                         }
+                        // Track tombstones for deferred pruning.
+                        match &env.op {
+                            crdt_sync::state_store::StoreOp::Sequence { key, op } => {
+                                if matches!(op, crdt_sync::rga::RGAOp::Delete { .. }) {
+                                    room.tombstones.push((ts, "Sequence", key.clone()));
+                                }
+                            }
+                            crdt_sync::state_store::StoreOp::Set { key, op } => {
+                                if matches!(op, crdt_sync::or_set::ORSetOp::Remove { .. }) {
+                                    room.tombstones.push((ts, "Set", key.clone()));
+                                }
+                            }
+                            _ => {}
+                        }
+                        room.store.apply_envelope(env);
                     }
                 }
 
-                let update = json!({ "type": "UPDATE", "data": text }).to_string();
-                let peers: Vec<mpsc::Sender<String>> = room
+                // Update vector clock for this client.
+                if max_ts_in_batch > 0 {
+                    let entry = room.client_clocks.entry(client_id).or_insert(0);
+                    if max_ts_in_batch > *entry {
+                        *entry = max_ts_in_batch;
+                    }
+                    if max_ts_in_batch > room.high_watermark {
+                        room.high_watermark = max_ts_in_batch;
+                    }
+                }
+
+                // Build UPDATE message for peers.
+                let update_msg = rmp_serde::to_vec_named(&ServerMessage::Update(blobs.clone()))
+                    .ok();
+
+                let peers: Vec<mpsc::Sender<Vec<u8>>> = room
                     .clients
                     .iter()
                     .filter(|&(&id, _)| id != client_id)
                     .map(|(_, tx)| tx.clone())
                     .collect();
-                (update, peers)
+
+                // Check whether any tombstones can be pruned.
+                let prune_bytes = check_and_prune(room);
+
+                (update_msg, peers, prune_bytes)
             };
 
             // Broadcast outside the lock.
-            for tx in &peer_senders {
-                let _ = tx.try_send(update_msg.clone());
+            if let Some(update_bytes) = update_bytes_opt {
+                for tx in &peer_senders {
+                    let _ = tx.try_send(update_bytes.clone());
+                }
+            }
+            // Broadcast PRUNE to ALL clients (including sender) if needed.
+            if let Some(prune_bytes) = prune_bytes_opt {
+                let mut map = rooms2.lock().await;
+                if let Some(room) = map.get_mut(&room_id2) {
+                    for (_, tx) in &room.clients {
+                        let _ = tx.try_send(prune_bytes.clone());
+                    }
+                }
             }
         }
     });
@@ -204,8 +285,35 @@ async fn cleanup(rooms: &Rooms, room_id: &str, client_id: u64) {
     let mut map = rooms.lock().await;
     if let Some(room) = map.get_mut(room_id) {
         room.clients.remove(&client_id);
+        room.client_clocks.remove(&client_id);
         if room.clients.is_empty() {
             map.remove(room_id);
         }
     }
+}
+
+/// Check if any tombstones can be pruned and return the serialised PRUNE message
+/// if so, removing the pruneable entries from the room's tracking list.
+fn check_and_prune(room: &mut Room) -> Option<Vec<u8>> {
+    if room.tombstones.is_empty() || room.clients.is_empty() {
+        return None;
+    }
+    if room.client_clocks.len() < room.clients.len() {
+        return None;
+    }
+    let min_clock = room.client_clocks.values().copied().min()?;
+    if min_clock == 0 {
+        return None;
+    }
+
+    // Tombstones strictly older than min_clock can be pruned.
+    let max_prune_ts = room
+        .tombstones
+        .iter()
+        .filter(|(ts, _, _)| *ts < min_clock)
+        .map(|(ts, _, _)| *ts)
+        .max()?;
+    room.tombstones.retain(|(ts, _, _)| *ts > max_prune_ts);
+
+    rmp_serde::to_vec_named(&ServerMessage::Prune(max_prune_ts)).ok()
 }
