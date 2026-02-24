@@ -12,6 +12,12 @@ export interface WasmStateStore {
   get_register(key: string): string | undefined;
   /** Apply a remote Envelope (serialised as JSON) to this store. */
   apply_envelope(envelope_json: string): void;
+  /**
+   * Merge a full server-state snapshot (serialised `StateStore` JSON) into this store.
+   * Called by `WebSocketManager` when the server sends a `SNAPSHOT` whose `data`
+   * field is a serialised `StateStore` (Rust relay format) rather than an envelope array.
+   */
+  merge_snapshot?(state_json: string): void;
 }
 
 /**

@@ -172,6 +172,20 @@ impl WasmStateStore {
 
     // ── Clock ─────────────────────────────────────────────────────────────
 
+    /// Merge a full state snapshot (serialised `StateStore` JSON) into this store.
+    ///
+    /// The server sends the entire `StateStore` as a JSON string in the initial
+    /// `SNAPSHOT` message.  Call this method to hydrate the local store with the
+    /// server's consolidated state before processing any new deltas.
+    ///
+    /// Throws a JavaScript error if the JSON cannot be deserialised.
+    pub fn merge_snapshot(&mut self, state_json: &str) -> Result<(), JsValue> {
+        let other: StateStore = serde_json::from_str(state_json)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.inner.merge(&other);
+        Ok(())
+    }
+
     /// Return the current Lamport clock value.
     ///
     /// Returned as `f64` because JavaScript's `Number` type cannot safely

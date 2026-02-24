@@ -256,6 +256,62 @@ describe('WebSocketManager – inbound SNAPSHOT', () => {
     expect(ws.send).toHaveBeenCalledTimes(1);
     jest.useRealTimers();
   });
+
+  test('calls merge_snapshot for a StateStore-format snapshot (Rust relay)', () => {
+    const store = makeStore();
+    store.merge_snapshot = jest.fn();
+    const proxy = new CrdtStateProxy(store);
+    const ws = makeWebSocket();
+    new WebSocketManager(store, proxy, ws);
+
+    const stateStoreJson = JSON.stringify({
+      node_id: 'server',
+      clock: { time: 3 },
+      registers: { 'robot.x': { node_id: 'server', state: [42, 3, 'server'] } },
+      sets: {},
+      sequences: {},
+    });
+    ws.simulateOpen();
+    // Simulate a SNAPSHOT whose data is a serialised StateStore object
+    ws.onmessage?.({ data: JSON.stringify({ type: 'SNAPSHOT', data: stateStoreJson }) });
+
+    expect(store.merge_snapshot).toHaveBeenCalledTimes(1);
+    expect(store.merge_snapshot).toHaveBeenCalledWith(stateStoreJson);
+    expect(store.apply_envelope).not.toHaveBeenCalled();
+  });
+
+  test('does not call merge_snapshot when store does not support it', () => {
+    // Store has no merge_snapshot — should not throw, and apply_envelope not called either
+    const store = makeStore(); // no merge_snapshot property
+    const proxy = new CrdtStateProxy(store);
+    const ws = makeWebSocket();
+    new WebSocketManager(store, proxy, ws);
+
+    const stateStoreJson = JSON.stringify({ node_id: 'server', clock: { time: 0 }, registers: {}, sets: {}, sequences: {} });
+    ws.simulateOpen();
+    expect(() => {
+      ws.onmessage?.({ data: JSON.stringify({ type: 'SNAPSHOT', data: stateStoreJson }) });
+    }).not.toThrow();
+    expect(store.apply_envelope).not.toHaveBeenCalled();
+  });
+
+  test('StateStore-format snapshot still enables outgoing sends', () => {
+    jest.useFakeTimers();
+    const store = makeStore();
+    store.merge_snapshot = jest.fn();
+    const proxy = new CrdtStateProxy(store);
+    const ws = makeWebSocket();
+    new WebSocketManager(store, proxy, ws);
+
+    const stateStoreJson = JSON.stringify({ node_id: 'server', clock: { time: 0 }, registers: {}, sets: {}, sequences: {} });
+    ws.simulateOpen();
+    ws.onmessage?.({ data: JSON.stringify({ type: 'SNAPSHOT', data: stateStoreJson }) });
+
+    (proxy.state as Record<string, unknown>).x = 7;
+    jest.runAllTimers();
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
+  });
 });
 
 describe('WebSocketManager – inbound UPDATE', () => {
