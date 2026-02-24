@@ -14,8 +14,23 @@ export interface UseCrdtStateOptions {
     wasmUrl?: string;
 }
 
+/**
+ * React hook that synchronises a CRDT state object over a WebSocket room.
+ *
+ * @param url       - WebSocket server base URL (e.g. `ws://localhost:8080`).
+ * @param roomId    - Room identifier. The hook connects to `${url}/rooms/${roomId}`.
+ * @param initialState - Initial key/value pairs written to the local store on
+ *                       first render.
+ * @param options   - Optional configuration (e.g. custom `wasmUrl`).
+ *
+ * @example
+ * ```tsx
+ * const { state, proxy, status } = useCrdtState('ws://localhost:8080', 'robot-42', { x: 0, y: 0 });
+ * ```
+ */
 export function useCrdtState<T extends Record<string, unknown>>(
     url: string,
+    roomId: string,
     initialState: T,
     options?: UseCrdtStateOptions
 ): UseCrdtStateResult<T> {
@@ -54,7 +69,9 @@ export function useCrdtState<T extends Record<string, unknown>>(
                 if (!active) return;
                 setProxy(currentProxy);
 
-                const ws = new WebSocket(url);
+                // Connect to the room-specific WebSocket endpoint.
+                const roomUrl = `${url}/rooms/${roomId}`;
+                const ws = new WebSocket(roomUrl);
 
                 ws.onopen = () => {
                     if (active) setStatus('open');
@@ -81,7 +98,7 @@ export function useCrdtState<T extends Record<string, unknown>>(
             active = false;
             if (manager) manager.disconnect();
         };
-    }, [url, initialRef, contextWasmUrl]);
+    }, [url, roomId, initialRef, contextWasmUrl]);
 
     useEffect(() => {
         if (!proxy) return;

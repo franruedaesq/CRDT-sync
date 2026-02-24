@@ -56,12 +56,15 @@ vi.mock('@crdt-sync/core', () => {
     };
 });
 
+const ROOM_ID = 'test-room';
+const WS_URL = 'ws://localhost:8080';
+const ROOM_URL = `${WS_URL}/rooms/${ROOM_ID}`;
+
 describe('useCrdtState Hook', () => {
-    const WS_URL = 'ws://localhost:8080';
     let server: WS;
 
     beforeEach(() => {
-        server = new WS(WS_URL);
+        server = new WS(ROOM_URL);
     });
 
     afterEach(() => {
@@ -71,7 +74,7 @@ describe('useCrdtState Hook', () => {
 
     describe('Unit behavior', () => {
         it('returns initial state and connects successfully', async () => {
-            const { result, unmount } = renderHook(() => useCrdtState(WS_URL, { count: 10 }));
+            const { result, unmount } = renderHook(() => useCrdtState(WS_URL, ROOM_ID, { count: 10 }));
 
             // Should start in 'connecting' status with initial state mirrored
             expect(result.current.status).toBe('connecting');
@@ -91,8 +94,9 @@ describe('useCrdtState Hook', () => {
         });
 
         it('handles server disconnection by resetting status to connecting', async () => {
-            const tempServer = new WS('ws://localhost:8081');
-            const { result, unmount } = renderHook(() => useCrdtState('ws://localhost:8081', { val: 0 }));
+            const tempRoomUrl = 'ws://localhost:8081/rooms/test-room';
+            const tempServer = new WS(tempRoomUrl);
+            const { result, unmount } = renderHook(() => useCrdtState('ws://localhost:8081', ROOM_ID, { val: 0 }));
 
             expect(result.current.status).toBe('connecting');
 
@@ -118,7 +122,7 @@ describe('useCrdtState Hook', () => {
             let externalProxyRef: any = null;
 
             const TestComponent = () => {
-                const { state, proxy, status } = useCrdtState(WS_URL, { message: 'initial' });
+                const { state, proxy, status } = useCrdtState(WS_URL, ROOM_ID, { message: 'initial' });
 
                 // Capture proxy reference to simulate Wasm background updates
                 if (proxy && !externalProxyRef) {
@@ -160,7 +164,7 @@ describe('useCrdtState Hook', () => {
 
         it('handles local state changes like a user typing', async () => {
             const TestComponent = () => {
-                const { state, proxy, status } = useCrdtState(WS_URL, { text: '' });
+                const { state, proxy, status } = useCrdtState(WS_URL, ROOM_ID, { text: '' });
 
                 const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
                     // This mimics how a real component binds the hook's proxy state to an input
@@ -209,7 +213,7 @@ describe('useCrdtState Hook', () => {
 
         it('handles complex nested object synchronization', async () => {
             const TestComponent = () => {
-                const { state, proxy, status } = useCrdtState(WS_URL, {
+                const { state, proxy, status } = useCrdtState(WS_URL, ROOM_ID, {
                     user: { name: 'Alice', settings: { theme: 'dark' } }
                 });
 
@@ -264,14 +268,14 @@ describe('useCrdtState Hook', () => {
             let proxyRef1: any = null;
 
             const TestComponent1 = () => {
-                const { state, proxy, status } = useCrdtState(WS_URL, { value: 0 });
+                const { state, proxy, status } = useCrdtState(WS_URL, ROOM_ID, { value: 0 });
                 if (proxy && !proxyRef1) proxyRef1 = proxy;
 
                 return <div data-testid="comp1">{status === 'open' ? (state.value as number) : 'loading'}</div>;
             };
 
             const TestComponent2 = () => {
-                const { state, status } = useCrdtState(WS_URL, { value: 0 });
+                const { state, status } = useCrdtState(WS_URL, ROOM_ID, { value: 0 });
                 return <div data-testid="comp2">{status === 'open' ? (state.value as number) : 'loading'}</div>;
             };
 
@@ -305,7 +309,7 @@ describe('useCrdtState Hook', () => {
         });
 
         it('cleans up WebSocket and proxy connections on unmount', async () => {
-            const { unmount, result } = renderHook(() => useCrdtState(WS_URL, { data: 1 }));
+            const { unmount, result } = renderHook(() => useCrdtState(WS_URL, ROOM_ID, { data: 1 }));
 
             await act(async () => {
                 await server.connected;
@@ -337,7 +341,7 @@ describe('useCrdtState Hook', () => {
             );
 
             const { result, unmount } = renderHook(
-                () => useCrdtState(WS_URL, { count: 0 }),
+                () => useCrdtState(WS_URL, ROOM_ID, { count: 0 }),
                 { wrapper }
             );
             await act(async () => { await server.connected; });
@@ -358,7 +362,7 @@ describe('useCrdtState Hook', () => {
             );
 
             const { result, unmount } = renderHook(
-                () => useCrdtState(WS_URL, { count: 0 }, { wasmUrl: 'https://cdn.example.com/from-hook.wasm' }),
+                () => useCrdtState(WS_URL, ROOM_ID, { count: 0 }, { wasmUrl: 'https://cdn.example.com/from-hook.wasm' }),
                 { wrapper }
             );
             await act(async () => { await server.connected; });
@@ -372,7 +376,7 @@ describe('useCrdtState Hook', () => {
             const { initWasm } = await import('@crdt-sync/core');
             const mockInitWasm = vi.mocked(initWasm);
 
-            const { result, unmount } = renderHook(() => useCrdtState(WS_URL, { count: 0 }));
+            const { result, unmount } = renderHook(() => useCrdtState(WS_URL, ROOM_ID, { count: 0 }));
             await act(async () => { await server.connected; });
             await waitFor(() => expect(result.current.status).toBe('open'));
 
