@@ -1,6 +1,6 @@
 {
     "name": "@crdt-sync/server",
-    "version": "0.3.2",
+    "version": "0.3.3",
     "description": "WebSocket relay server for crdt-sync",
     "main": "dist/relay.js",
     "types": "dist/relay.d.ts",
@@ -12,6 +12,9 @@
             "types": "./dist/relay.d.ts",
             "require": "./dist/relay.js"
         }
+    },
+    "publishConfig": {
+        "access": "public"
     },
     "files": [
         "dist"
