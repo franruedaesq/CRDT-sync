@@ -164,7 +164,13 @@ export class CrdtStateProxy<T extends Record<string, unknown> = Record<string, u
       set: (_target, prop, value: unknown) => {
         if (typeof prop === 'symbol') return false;
         const key = String(prop);
-        const envelope = this._store.set_register(key, JSON.stringify(value));
+        let envelope = "";
+        try {
+          envelope = this._store.set_register(key, JSON.stringify(value));
+        } catch (e) {
+          console.error("PANIC in set_register for key:", key, "value:", value);
+          throw e;
+        }
         this._emit({ key, value, envelope });
         this._emitChange();
         return true;
