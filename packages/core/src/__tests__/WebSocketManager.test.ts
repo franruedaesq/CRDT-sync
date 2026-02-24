@@ -21,7 +21,11 @@ interface MockWebSocket extends WebSocketLike {
   close: jest.Mock;
   /** Helper: simulate the connection opening. */
   simulateOpen(): void;
-  /** Helper: simulate a message arriving from a peer. */
+  /** Helper: simulate a SNAPSHOT message from the server. */
+  simulateSnapshot(envelopes: string[]): void;
+  /** Helper: simulate an UPDATE message from the server. */
+  simulateUpdate(batch: string): void;
+  /** Helper: simulate a raw message arriving (legacy format). */
   simulateMessage(data: string): void;
   /** Helper: simulate the connection closing. */
   simulateClose(): void;
@@ -41,6 +45,12 @@ function makeWebSocket(): MockWebSocket {
     simulateOpen() {
       ws.readyState = 1; // OPEN
       ws.onopen?.({});
+    },
+    simulateSnapshot(envelopes: string[]) {
+      ws.onmessage?.({ data: JSON.stringify({ type: 'SNAPSHOT', data: JSON.stringify(envelopes) }) });
+    },
+    simulateUpdate(batch: string) {
+      ws.onmessage?.({ data: JSON.stringify({ type: 'UPDATE', data: batch }) });
     },
     simulateMessage(data: string) {
       ws.onmessage?.({ data });
@@ -63,13 +73,14 @@ describe('WebSocketManager – outbound broadcast', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
 
-  test('sends the envelope returned by set_register over WebSocket after open', () => {
+  test('sends the envelope returned by set_register over WebSocket after open and snapshot', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
     const ws = makeWebSocket();
     new WebSocketManager(store, proxy, ws);
 
     ws.simulateOpen();
+    ws.simulateSnapshot([]); // hydrate: enables outgoing sends
     (proxy.state as Record<string, unknown>).x = 10;
     jest.runAllTimers();
 
@@ -93,6 +104,19 @@ describe('WebSocketManager – outbound broadcast', () => {
     expect(ws.send).not.toHaveBeenCalled();
   });
 
+  test('does not send before the snapshot is received', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const ws = makeWebSocket();
+    new WebSocketManager(store, proxy, ws);
+
+    ws.simulateOpen(); // open but no snapshot yet
+    (proxy.state as Record<string, unknown>).x = 10;
+    jest.runAllTimers();
+
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
   test('batches multiple synchronous writes into a single send', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
@@ -100,6 +124,7 @@ describe('WebSocketManager – outbound broadcast', () => {
     new WebSocketManager(store, proxy, ws);
 
     ws.simulateOpen();
+    ws.simulateSnapshot([]);
     (proxy.state as Record<string, unknown>).a = 1;
     (proxy.state as Record<string, unknown>).b = 2;
     (proxy.state as Record<string, unknown>).c = 3;
@@ -118,6 +143,7 @@ describe('WebSocketManager – outbound broadcast', () => {
     new WebSocketManager(store, proxy, ws);
 
     ws.simulateOpen();
+    ws.simulateSnapshot([]);
     (proxy.state as Record<string, unknown>).a = 1;
     jest.runAllTimers(); // flush first frame
 
@@ -138,6 +164,7 @@ describe('WebSocketManager – outbound broadcast', () => {
     new WebSocketManager(store, proxy, ws);
 
     ws.simulateOpen();
+    ws.simulateSnapshot([]);
     (proxy.state as Record<string, unknown>)['robot.speed'] = 99;
     jest.runAllTimers();
 
@@ -153,6 +180,7 @@ describe('WebSocketManager – outbound broadcast', () => {
     const manager = new WebSocketManager(store, proxy, ws);
 
     ws.simulateOpen();
+    ws.simulateSnapshot([]);
     manager.disconnect();
 
     (proxy.state as Record<string, unknown>).x = 10;
@@ -167,6 +195,7 @@ describe('WebSocketManager – outbound broadcast', () => {
     new WebSocketManager(store, proxy, ws);
 
     ws.simulateOpen();
+    ws.simulateSnapshot([]);
     ws.simulateClose();
 
     (proxy.state as Record<string, unknown>).x = 10;
@@ -181,6 +210,7 @@ describe('WebSocketManager – outbound broadcast', () => {
     new WebSocketManager(store, proxy, ws);
 
     ws.simulateOpen();
+    ws.simulateSnapshot([]);
     ws.simulateError();
 
     (proxy.state as Record<string, unknown>).x = 10;
@@ -189,9 +219,65 @@ describe('WebSocketManager – outbound broadcast', () => {
   });
 });
 
-// ── Inbound: peer envelopes are applied to the local store ───────────────────
+// ── Inbound: SNAPSHOT and UPDATE messages ────────────────────────────────────
 
-describe('WebSocketManager – inbound apply', () => {
+describe('WebSocketManager – inbound SNAPSHOT', () => {
+  test('applies each envelope in the snapshot and notifies', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const ws = makeWebSocket();
+    new WebSocketManager(store, proxy, ws);
+
+    const env1 = JSON.stringify({ timestamp: 1, node_id: 'n1', op: { kind: 'Register', key: 'a', op: {} } });
+    const env2 = JSON.stringify({ timestamp: 2, node_id: 'n2', op: { kind: 'Register', key: 'b', op: {} } });
+    ws.simulateOpen();
+    ws.simulateSnapshot([env1, env2]);
+
+    expect(store.apply_envelope).toHaveBeenCalledTimes(2);
+    expect(store.apply_envelope).toHaveBeenNthCalledWith(1, env1);
+    expect(store.apply_envelope).toHaveBeenNthCalledWith(2, env2);
+  });
+
+  test('empty snapshot applies no envelopes but still enables outgoing sends', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const ws = makeWebSocket();
+
+    jest.useFakeTimers();
+    new WebSocketManager(store, proxy, ws);
+
+    ws.simulateOpen();
+    ws.simulateSnapshot([]);
+    expect(store.apply_envelope).not.toHaveBeenCalled();
+
+    // After snapshot, local writes should be sent
+    (proxy.state as Record<string, unknown>).n = 1;
+    jest.runAllTimers();
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    jest.useRealTimers();
+  });
+});
+
+describe('WebSocketManager – inbound UPDATE', () => {
+  test('calls apply_envelope for each envelope in an UPDATE batch', () => {
+    const store = makeStore();
+    const proxy = new CrdtStateProxy(store);
+    const ws = makeWebSocket();
+    new WebSocketManager(store, proxy, ws);
+
+    const env1 = JSON.stringify({ timestamp: 1, node_id: 'n2', op: { kind: 'Register', key: 'a', op: {} } });
+    const env2 = JSON.stringify({ timestamp: 2, node_id: 'n2', op: { kind: 'Register', key: 'b', op: {} } });
+    ws.simulateUpdate(JSON.stringify([env1, env2]));
+
+    expect(store.apply_envelope).toHaveBeenCalledTimes(2);
+    expect(store.apply_envelope).toHaveBeenNthCalledWith(1, env1);
+    expect(store.apply_envelope).toHaveBeenNthCalledWith(2, env2);
+  });
+});
+
+// ── Inbound: peer envelopes are applied to the local store (legacy format) ───
+
+describe('WebSocketManager – inbound apply (legacy format)', () => {
   test('calls apply_envelope with the raw message data for a single-envelope frame', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
@@ -277,13 +363,14 @@ describe('WebSocketManager – offline buffering', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
 
-  test('buffers envelopes written while the socket is closed and flushes on reconnect', () => {
+  test('buffers envelopes written while the socket is closed and flushes on reconnect+snapshot', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
     const ws = makeWebSocket();
     new WebSocketManager(store, proxy, ws);
 
     ws.simulateOpen();
+    ws.simulateSnapshot([]); // first connection snapshot
     ws.simulateClose();
 
     // Writes while offline should be buffered, not sent immediately.
@@ -292,9 +379,12 @@ describe('WebSocketManager – offline buffering', () => {
     jest.runAllTimers(); // batch flush moves envelopes to offline queue
     expect(ws.send).not.toHaveBeenCalled();
 
-    // Reconnect: all buffered envelopes must be flushed in order in one batch.
+    // Reconnect: offline queue flushed only after snapshot arrives.
     ws.readyState = 1;
     ws.simulateOpen();
+    expect(ws.send).not.toHaveBeenCalled(); // still waiting for snapshot
+
+    ws.simulateSnapshot([]); // snapshot received → flush offline queue
     expect(ws.send).toHaveBeenCalledTimes(1);
     const batch = JSON.parse(ws.send.mock.calls[0][0] as string) as string[];
     expect(batch).toHaveLength(2);
@@ -312,19 +402,23 @@ describe('WebSocketManager – offline buffering', () => {
     expect(ws.send).not.toHaveBeenCalled();
 
     ws.simulateOpen();
+    expect(ws.send).not.toHaveBeenCalled(); // waiting for snapshot
+
+    ws.simulateSnapshot([]); // snapshot received → flush offline queue
     expect(ws.send).toHaveBeenCalledTimes(1);
     const batch = JSON.parse(ws.send.mock.calls[0][0] as string) as string[];
     expect(batch).toHaveLength(1);
     expect(JSON.parse(batch[0])).toMatchObject({ op: { key: 'a' } });
   });
 
-  test('buffers envelopes written after a WebSocket error and flushes on reconnect', () => {
+  test('buffers envelopes written after a WebSocket error and flushes on reconnect+snapshot', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
     const ws = makeWebSocket();
     new WebSocketManager(store, proxy, ws);
 
     ws.simulateOpen();
+    ws.simulateSnapshot([]); // first connection snapshot (no pending writes yet)
     ws.simulateError(); // sets readyState = 3
 
     (proxy.state as Record<string, unknown>).z = 99;
@@ -332,7 +426,8 @@ describe('WebSocketManager – offline buffering', () => {
     expect(ws.send).not.toHaveBeenCalled();
 
     ws.readyState = 1;
-    ws.simulateOpen();
+    ws.simulateOpen(); // reconnect, waiting for snapshot
+    ws.simulateSnapshot([]); // snapshot received → flush offline queue
     expect(ws.send).toHaveBeenCalledTimes(1);
     const batch = JSON.parse(ws.send.mock.calls[0][0] as string) as string[];
     expect(batch).toHaveLength(1);
@@ -346,6 +441,7 @@ describe('WebSocketManager – offline buffering', () => {
     const manager = new WebSocketManager(store, proxy, ws);
 
     ws.simulateOpen();
+    ws.simulateSnapshot([]);
     ws.simulateClose();
 
     (proxy.state as Record<string, unknown>).x = 1;
@@ -356,6 +452,7 @@ describe('WebSocketManager – offline buffering', () => {
     // Reconnecting after an explicit disconnect should not flush the old buffer.
     ws.readyState = 1;
     ws.simulateOpen();
+    ws.simulateSnapshot([]);
     expect(ws.send).not.toHaveBeenCalled();
   });
 
@@ -366,11 +463,13 @@ describe('WebSocketManager – offline buffering', () => {
     new WebSocketManager(store, proxy, ws);
 
     ws.simulateOpen();
+    ws.simulateSnapshot([]);
     ws.simulateClose();
 
     // No writes while offline.
     ws.readyState = 1;
     ws.simulateOpen();
+    ws.simulateSnapshot([]);
 
     // Write after reconnect is batched and sent on next tick.
     (proxy.state as Record<string, unknown>).n = 5;
