@@ -2,7 +2,8 @@
     "name": "crdt-sync-workspace",
     "private": true,
     "scripts": {
-        "build": "npm run build --workspaces --if-present"
+        "build": "npm run build --workspaces --if-present",
+        "build:wasm": "npm run build:wasm --workspace=@crdt-sync/core"
     },
     "workspaces": [
         "packages/*"
