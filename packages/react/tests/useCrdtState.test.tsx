@@ -1,6 +1,7 @@
 import React from 'react';
 import { renderHook, act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { useCrdtState } from '../src/useCrdtState';
+import { CrdtSyncProvider } from '../src/CrdtSyncContext';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import WS from 'vitest-websocket-mock';
 
@@ -36,20 +37,15 @@ vi.mock('@crdt-sync/core', () => {
         disconnect() { }
     }
 
+    class MockStore {
+        constructor(_id: string) { }
+    }
+
     return {
         CrdtStateProxy: MockProxy,
         WebSocketManager: MockManager,
-    };
-});
-
-vi.mock('@crdt-sync/core/pkg/web/crdt_sync.js', () => {
-    class MockStore {
-        constructor(id: string) { }
-    }
-    return {
-        __esModule: true,
-        default: vi.fn(() => Promise.resolve()), // mock WebAssembly init
-        WasmStateStore: MockStore
+        WasmStateStore: MockStore,
+        initWasm: vi.fn(() => Promise.resolve()),
     };
 });
 
@@ -314,9 +310,65 @@ describe('useCrdtState Hook', () => {
 
             unmount();
 
-            // WebSocket mock doesn't natively expose active connections strictly mapped to hooks trivially, 
+            // WebSocket mock doesn't natively expose active connections strictly mapped to hooks trivially,
             // but we verify the unmount executes without crashing
             expect(true).toBe(true);
+        });
+    });
+
+    describe('CrdtSyncProvider context', () => {
+        it('passes wasmUrl from provider to initWasm', async () => {
+            const { initWasm } = await import('@crdt-sync/core');
+            const mockInitWasm = vi.mocked(initWasm);
+
+            const wrapper = ({ children }: { children: React.ReactNode }) => (
+                <CrdtSyncProvider wasmUrl="https://cdn.example.com/crdt_sync_bg.wasm">
+                    {children}
+                </CrdtSyncProvider>
+            );
+
+            const { result, unmount } = renderHook(
+                () => useCrdtState(WS_URL, { count: 0 }),
+                { wrapper }
+            );
+            await act(async () => { await server.connected; });
+            await waitFor(() => expect(result.current.status).toBe('open'));
+
+            expect(mockInitWasm).toHaveBeenCalledWith('https://cdn.example.com/crdt_sync_bg.wasm');
+            unmount();
+        });
+
+        it('hook-level wasmUrl overrides provider wasmUrl', async () => {
+            const { initWasm } = await import('@crdt-sync/core');
+            const mockInitWasm = vi.mocked(initWasm);
+
+            const wrapper = ({ children }: { children: React.ReactNode }) => (
+                <CrdtSyncProvider wasmUrl="https://cdn.example.com/from-provider.wasm">
+                    {children}
+                </CrdtSyncProvider>
+            );
+
+            const { result, unmount } = renderHook(
+                () => useCrdtState(WS_URL, { count: 0 }, { wasmUrl: 'https://cdn.example.com/from-hook.wasm' }),
+                { wrapper }
+            );
+            await act(async () => { await server.connected; });
+            await waitFor(() => expect(result.current.status).toBe('open'));
+
+            expect(mockInitWasm).toHaveBeenCalledWith('https://cdn.example.com/from-hook.wasm');
+            unmount();
+        });
+
+        it('uses undefined when no provider and no option', async () => {
+            const { initWasm } = await import('@crdt-sync/core');
+            const mockInitWasm = vi.mocked(initWasm);
+
+            const { result, unmount } = renderHook(() => useCrdtState(WS_URL, { count: 0 }));
+            await act(async () => { await server.connected; });
+            await waitFor(() => expect(result.current.status).toBe('open'));
+
+            expect(mockInitWasm).toHaveBeenCalledWith(undefined);
+            unmount();
         });
     });
 });

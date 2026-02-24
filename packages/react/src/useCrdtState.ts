@@ -1,7 +1,6 @@
-import { useState, useEffect } from 'react';
-import { CrdtStateProxy, WebSocketManager } from '@crdt-sync/core';
-// @ts-ignore: Wasm module will be generated during the full build
-import init, { WasmStateStore } from '@crdt-sync/core/pkg/web/crdt_sync.js';
+import { useState, useEffect, useContext } from 'react';
+import { CrdtStateProxy, WebSocketManager, initWasm, WasmStateStore } from '@crdt-sync/core';
+import { CrdtSyncContext } from './CrdtSyncContext.js';
 
 export type CrdtStatus = 'connecting' | 'open' | 'error';
 
@@ -27,6 +26,8 @@ export function useCrdtState<T extends Record<string, unknown>>(
     // Note: we're ignoring initialState updates (this behaves like useState).
     const [initialRef] = useState(initialState);
 
+    const { wasmUrl: contextWasmUrl } = useContext(CrdtSyncContext);
+
     useEffect(() => {
         let active = true;
         let manager: WebSocketManager | null = null;
@@ -34,7 +35,7 @@ export function useCrdtState<T extends Record<string, unknown>>(
 
         async function setup() {
             try {
-                await init(options?.wasmUrl);
+                await initWasm(options?.wasmUrl ?? contextWasmUrl);
                 if (!active) return;
 
                 // Create a unique client ID
@@ -78,7 +79,7 @@ export function useCrdtState<T extends Record<string, unknown>>(
             active = false;
             if (manager) manager.disconnect();
         };
-    }, [url, initialRef]);
+    }, [url, initialRef, contextWasmUrl]);
 
     useEffect(() => {
         if (!proxy) return;
