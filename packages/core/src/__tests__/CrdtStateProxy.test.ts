@@ -1,3 +1,4 @@
+import { encode as msgpackEncode } from '@msgpack/msgpack';
 import { CrdtStateProxy, WasmStateStore, UpdateEvent } from '../CrdtStateProxy';
 
 // ── Mock WasmStateStore ───────────────────────────────────────────────────────
@@ -7,8 +8,8 @@ function makeStore(): jest.Mocked<WasmStateStore> {
   return {
     set_register: jest.fn((key: string, value_json: string) => {
       store[key] = value_json;
-      // Return a minimal fake envelope JSON.
-      return JSON.stringify({ timestamp: 1, node_id: 'node-1', op: { kind: 'Register', key, op: { value: JSON.parse(value_json), timestamp: 1, node_id: 'node-1' } } });
+      // Return a minimal fake envelope as MessagePack bytes.
+      return msgpackEncode({ timestamp: 1, node_id: 'node-1', op: { kind: 'Register', key, op: { value: JSON.parse(value_json), timestamp: 1, node_id: 'node-1' } } });
     }),
     get_register: jest.fn((key: string) => store[key]),
     apply_envelope: jest.fn(),
@@ -147,7 +148,7 @@ describe('CrdtStateProxy – onUpdate event emitter', () => {
     expect(events[0].value).toBe(100);
   });
 
-  test('passes the envelope string from set_register to onUpdate', () => {
+  test('passes the envelope bytes from set_register to onUpdate', () => {
     const store = makeStore();
     const proxy = new CrdtStateProxy(store);
     const events: UpdateEvent[] = [];
@@ -155,8 +156,8 @@ describe('CrdtStateProxy – onUpdate event emitter', () => {
     proxy.onUpdate((e) => events.push(e));
     (proxy.state as Record<string, unknown>).x = 42;
 
-    const expectedEnvelope = store.set_register.mock.results[0].value as string;
-    expect(events[0].envelope).toBe(expectedEnvelope);
+    const expectedEnvelope = store.set_register.mock.results[0].value as Uint8Array;
+    expect(events[0].envelope).toEqual(expectedEnvelope);
   });
 
   test('fires onUpdate with dot-path key for bracket-notation writes', () => {
