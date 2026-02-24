@@ -4,6 +4,9 @@
     "description": "React hook adapter for crdt-sync",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
+    "files": [
+        "dist"
+    ],
     "scripts": {
         "build": "tsc"
     },
