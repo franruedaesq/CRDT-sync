@@ -2,5 +2,8 @@
 /node_modules
 /packages/*/node_modules
 /packages/*/dist
-/packages/*/pkg
+/packages/*/pkg/bundler
+/packages/*/pkg/web/*.wasm
+/packages/*/pkg/web/package.json
+/packages/*/pkg/web/.gitignore
 /pkg
