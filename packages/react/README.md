@@ -126,3 +126,32 @@ export function App() {
   return <div>{state.count}</div>;
 }
 ```
+
+Additionally, if Vite fails to start or throws errors during pre-bundling, add this to your `vite.config.ts`:
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  optimizeDeps: {
+    // Prevent Vite from pre-bundling @crdt-sync/core.
+    // The package uses dynamic WebAssembly imports that Vite cannot
+    // handle during pre-bundling.
+    exclude: ['@crdt-sync/core'],
+  },
+});
+```
+
+---
+
+## Server Setup
+
+`@crdt-sync/react` connects to any WebSocket endpoint that speaks the `crdt-sync` envelope protocol. The simplest option is to run the official relay server:
+
+```bash
+npm install @crdt-sync/server
+npx crdt-sync-server --port 8080
+```
+
+See the [@crdt-sync/server README](https://www.npmjs.com/package/@crdt-sync/server) for full documentation.

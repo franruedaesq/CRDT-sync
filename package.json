@@ -2,8 +2,15 @@
     "name": "crdt-sync-workspace",
     "private": true,
     "scripts": {
-        "build": "npm run build --workspaces --if-present",
-        "build:wasm": "npm run build:wasm --workspace=@crdt-sync/core"
+        "build:wasm": "npm run build:wasm --workspace=@crdt-sync/core",
+        "build": "npm run build:wasm && npm run build --workspaces --if-present",
+        "test": "npm run test --workspaces --if-present",
+        "lint": "npm run lint --workspaces --if-present",
+        "prepublishOnly": "npm run build",
+        "publish:core": "npm publish --workspace=@crdt-sync/core",
+        "publish:react": "npm publish --workspace=@crdt-sync/react",
+        "publish:server": "npm publish --workspace=@crdt-sync/server",
+        "publish:all": "npm run publish:core && npm run publish:react && npm run publish:server"
     },
     "workspaces": [
         "packages/*"

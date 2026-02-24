@@ -1,6 +1,6 @@
 {
   "name": "@crdt-sync/core",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "TypeScript proxy wrapper for the crdt-sync Wasm StateStore",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -28,6 +28,7 @@
     "build:wasm:bundler": "wasm-pack build ../.. --target bundler --out-dir packages/core/pkg/bundler",
     "build:wasm:web": "wasm-pack build ../.. --target web --out-dir packages/core/pkg/web",
     "build:wasm": "npm run build:wasm:bundler && npm run build:wasm:web && rm -f pkg/bundler/.gitignore pkg/web/.gitignore",
+    "prepublishOnly": "npm run build:wasm && npm run build",
     "test": "jest",
     "lint": "tsc --noEmit"
   },

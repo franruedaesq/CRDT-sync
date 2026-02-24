@@ -67,11 +67,11 @@ export type UpdateHandler = (event: UpdateEvent) => void;
  * const unsubscribe = proxy.onChange(() => setTick(t => t + 1));
  * ```
  */
-export class CrdtStateProxy {
+export class CrdtStateProxy<T extends Record<string, unknown> = Record<string, unknown>> {
   private readonly _store: WasmStateStore;
   private readonly _handlers: Set<UpdateHandler> = new Set();
   private readonly _changeHandlers: Set<() => void> = new Set();
-  private readonly _state: Record<string, unknown>;
+  private readonly _state: T;
 
   /**
    * Create a new `CrdtStateProxy` backed by the given `WasmStateStore`.
@@ -92,7 +92,7 @@ export class CrdtStateProxy {
    * not been set yet.  Assigning a value calls `WasmStateStore.set_register`
    * and fires all `onUpdate` and `onChange` listeners.
    */
-  get state(): Record<string, unknown> {
+  get state(): T {
     return this._state;
   }
 
@@ -153,8 +153,8 @@ export class CrdtStateProxy {
    * Keys may be dot-separated paths (e.g. `"robot.speed"`) when using bracket
    * notation: `proxy.state["robot.speed"] = 100`.
    */
-  private _makeProxy(): Record<string, unknown> {
-    return new Proxy({} as Record<string, unknown>, {
+  private _makeProxy(): T {
+    return new Proxy({} as T, {
       get: (_target, prop) => {
         if (typeof prop === 'symbol') return undefined;
         const raw = this._store.get_register(String(prop));

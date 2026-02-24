@@ -4,9 +4,9 @@ import { CrdtSyncContext } from './CrdtSyncContext.js';
 
 export type CrdtStatus = 'connecting' | 'open' | 'error';
 
-export interface UseCrdtStateResult<T> {
+export interface UseCrdtStateResult<T extends Record<string, unknown>> {
     state: T;
-    proxy: CrdtStateProxy | null;
+    proxy: CrdtStateProxy<T> | null;
     status: CrdtStatus;
 }
 
@@ -19,7 +19,7 @@ export function useCrdtState<T extends Record<string, unknown>>(
     initialState: T,
     options?: UseCrdtStateOptions
 ): UseCrdtStateResult<T> {
-    const [proxy, setProxy] = useState<CrdtStateProxy | null>(null);
+    const [proxy, setProxy] = useState<CrdtStateProxy<T> | null>(null);
     const [status, setStatus] = useState<CrdtStatus>('connecting');
     const [, setTick] = useState(0);
 
@@ -31,7 +31,7 @@ export function useCrdtState<T extends Record<string, unknown>>(
     useEffect(() => {
         let active = true;
         let manager: WebSocketManager | null = null;
-        let currentProxy: CrdtStateProxy | null = null;
+        let currentProxy: CrdtStateProxy<T> | null = null;
 
         async function setup() {
             try {
@@ -42,11 +42,13 @@ export function useCrdtState<T extends Record<string, unknown>>(
                 const clientId = 'client-' + Math.random().toString(36).substring(2, 11);
                 const store = new WasmStateStore(clientId);
 
-                currentProxy = new CrdtStateProxy(store);
+                currentProxy = new CrdtStateProxy<T>(store);
 
-                // Initialize state
+                // Initialize state. Cast needed: TypeScript disallows index-writes on a
+                // generic T even though T extends Record<string, unknown>.
+                const mutableState = currentProxy.state as Record<string, unknown>;
                 for (const [key, value] of Object.entries(initialRef)) {
-                    currentProxy.state[key] = value;
+                    mutableState[key] = value;
                 }
 
                 if (!active) return;
