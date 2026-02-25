@@ -300,6 +300,16 @@ impl<T: Clone + PartialEq> RGA<T> {
         Some(op)
     }
 
+    /// Physically remove tombstoned nodes from the sequence whose insertion
+    /// clock is at or before `before_ts`.
+    ///
+    /// Called after a server `PRUNE` broadcast.  Tombstoned nodes whose
+    /// `id.clock ≤ before_ts` are guaranteed to have been observed by every
+    /// connected client, so the backing memory can be safely reclaimed.
+    pub fn prune_tombstones(&mut self, before_ts: u64) {
+        self.nodes.retain(|n| !n.deleted || n.id.clock > before_ts);
+    }
+
     /// Merge another RGA's state into this one (state-based / CvRDT).
     ///
     /// Every element present in `other` but absent from `self` is inserted at

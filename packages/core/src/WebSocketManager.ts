@@ -1,3 +1,4 @@
+import { encode as msgpackEncode, decode as msgpackDecode } from '@msgpack/msgpack';
 import { CrdtStateProxy } from './CrdtStateProxy.js';
 import type { WasmStateStore } from './CrdtStateProxy.js';
 
@@ -10,12 +11,12 @@ import type { WasmStateStore } from './CrdtStateProxy.js';
 export interface WebSocketLike {
   /** Current connection state (0 = CONNECTING, 1 = OPEN, 2 = CLOSING, 3 = CLOSED). */
   readonly readyState: number;
-  /** Send a UTF-8 string frame to the server. */
-  send(data: string): void;
+  /** Send a binary frame to the server. */
+  send(data: Uint8Array | ArrayBuffer): void;
   /** Initiate the closing handshake. */
   close(): void;
   /** Fired when a message frame is received. */
-  onmessage: ((event: { data: string }) => void) | null;
+  onmessage: ((event: { data: ArrayBuffer | Uint8Array }) => void) | null;
   /** Fired when the connection is established. */
   onopen: ((event: unknown) => void) | null;
   /** Fired when the connection is closed. */
@@ -33,18 +34,23 @@ export interface WebSocketLike {
  *
  * ```
  * Local write
- *   → CrdtStateProxy.onUpdate  (envelope collected in _pendingEnvelopes)
+ *   → CrdtStateProxy.onUpdate  (envelope Uint8Array collected in _pendingEnvelopes)
  *   → requestAnimationFrame / setTimeout schedules a batch flush
- *   → WebSocket.send(JSON.stringify(envelopes))   // one payload per frame
+ *   → WebSocket.send(msgpackEncode(envelopes))   // one binary payload per frame
  *
  * Incoming SNAPSHOT (first message from server after connection opens)
- *   → WebSocket.onmessage  { type: 'SNAPSHOT', data: envelopes_json }
- *   → WasmStateStore.apply_envelope() for each envelope in the snapshot
+ *   → WebSocket.onmessage  { data: ArrayBuffer }  decoded as { type: 'SNAPSHOT', data: Uint8Array[] | Uint8Array }
+ *   → envelope array → WasmStateStore.apply_envelope() for each envelope
+ *   → OR StateStore msgpack blob → WasmStateStore.merge_snapshot()
  *   → offline queue flushed so buffered local writes reach the server
  *
  * Incoming UPDATE (peer delta from server)
- *   → WebSocket.onmessage  { type: 'UPDATE', data: batch_json }
- *   → WasmStateStore.apply_envelope() for each envelope in the batch
+ *   → WebSocket.onmessage  { data: ArrayBuffer }  decoded as { type: 'UPDATE', data: Uint8Array[] }
+ *   → WasmStateStore.apply_envelope() for each envelope in the array
+ *
+ * Incoming PRUNE (server GC broadcast)
+ *   → WebSocket.onmessage  { data: ArrayBuffer }  decoded as { type: 'PRUNE', data: number }
+ *   → WasmStateStore.prune_tombstones(data) to physically erase dead entries
  * ```
  *
  * ## Snapshot wait
@@ -86,12 +92,12 @@ export class WebSocketManager {
   private readonly _proxy: CrdtStateProxy;
   private readonly _ws: WebSocketLike;
   private _unsubscribe: (() => void) | null = null;
-  /** Envelopes collected in the current frame, waiting for the batch flush. */
-  private _pendingEnvelopes: string[] = [];
+  /** Envelope bytes collected in the current frame, waiting for the batch flush. */
+  private _pendingEnvelopes: Uint8Array[] = [];
   /** Cancels the currently scheduled batch flush (rAF or setTimeout handle). */
   private _cancelFlush: (() => void) | null = null;
-  /** Envelopes queued while the socket is not open or snapshot has not yet arrived. */
-  private _offlineQueue: string[] = [];
+  /** Envelope bytes queued while the socket is not open or snapshot has not yet arrived. */
+  private _offlineQueue: Uint8Array[] = [];
   /**
    * Set to `true` once the server's initial `SNAPSHOT` message has been applied.
    * Outgoing envelopes are held in `_offlineQueue` until this flag is set so that
@@ -142,82 +148,79 @@ export class WebSocketManager {
     };
 
     // Apply messages received from the server.
-    // The server sends two kinds of typed messages:
-    //   { type: 'SNAPSHOT', data: string }  — full state on first connect
-    //   { type: 'UPDATE',   data: string }  — a peer's envelope batch
-    // For backward-compatibility with older relay versions that send raw
-    // envelope arrays directly, the legacy format is still handled as a
-    // fallback.
+    // All server messages are binary-encoded MessagePack frames:
+    //   { type: 'SNAPSHOT', data: Uint8Array[] | Uint8Array }
+    //   { type: 'UPDATE',   data: Uint8Array[] }
+    //   { type: 'PRUNE',    data: number }
     ws.onmessage = (event) => {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(event.data);
-      } catch {
-        parsed = null;
-      }
-
-      // ── Typed protocol (new server) ──────────────────────────────────────
-      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) && 'type' in (parsed as object)) {
-        const msg = parsed as { type: string; data: string };
-
-        if (msg.type === 'SNAPSHOT') {
-          // Hydrate local store with the server's consolidated state.
-          let snapshotEnvelopes: unknown;
-          try {
-            snapshotEnvelopes = JSON.parse(msg.data);
-          } catch {
-            snapshotEnvelopes = [];
-          }
-          if (Array.isArray(snapshotEnvelopes)) {
-            for (const env of snapshotEnvelopes) {
-              if (typeof env === 'string') {
-                this._store.apply_envelope(env);
-              }
-            }
-          }
-          // Allow outgoing writes now that we hold the server's state.
-          this._snapshotReceived = true;
-          this._proxy.notifyRemoteUpdate();
-          this._flushOfflineQueue();
-          return;
-        }
-
-        if (msg.type === 'UPDATE') {
-          // Apply a peer's batch of envelopes.
-          let updateEnvelopes: unknown;
-          try {
-            updateEnvelopes = JSON.parse(msg.data);
-          } catch {
-            updateEnvelopes = null;
-          }
-          if (Array.isArray(updateEnvelopes)) {
-            for (const env of updateEnvelopes) {
-              if (typeof env === 'string') {
-                this._store.apply_envelope(env);
-              }
-            }
-          } else {
-            this._store.apply_envelope(msg.data);
-          }
-          this._proxy.notifyRemoteUpdate();
-          return;
-        }
-      }
-
-      // ── Legacy fallback (old relay format) ───────────────────────────────
-      // Peers may send either a single envelope JSON string or a JSON array
-      // of envelope strings (batch format).
-      if (Array.isArray(parsed)) {
-        for (const env of parsed) {
-          if (typeof env === 'string') {
-            this._store.apply_envelope(env);
-          }
-        }
+      // Normalise to Uint8Array regardless of whether the WebSocket delivers
+      // an ArrayBuffer (browsers) or a Buffer/Uint8Array (Node.js / ws lib).
+      const raw = event.data;
+      let bytes: Uint8Array;
+      if (raw instanceof ArrayBuffer) {
+        bytes = new Uint8Array(raw);
+      } else if (raw instanceof Uint8Array) {
+        bytes = raw;
       } else {
-        this._store.apply_envelope(event.data);
+        // Non-binary frame — ignore (not part of the binary protocol).
+        return;
       }
-      // Notify UI listeners (e.g. React) that remote state has been applied.
-      this._proxy.notifyRemoteUpdate();
+
+      let msg: unknown;
+      try {
+        msg = msgpackDecode(bytes);
+      } catch {
+        return;
+      }
+
+      if (msg === null || typeof msg !== 'object' || !('type' in (msg as object))) return;
+      const { type, data } = msg as { type: string; data: unknown };
+
+      // ── SNAPSHOT ───────────────────────────────────────────────────────
+      if (type === 'SNAPSHOT') {
+        if (Array.isArray(data)) {
+          // TypeScript relay: array of MessagePack-encoded envelope blobs.
+          for (const envBytes of data) {
+            if (envBytes instanceof Uint8Array) {
+              this._store.apply_envelope(envBytes);
+            }
+          }
+        } else if (data instanceof Uint8Array && this._store.merge_snapshot) {
+          // Rust relay: full StateStore serialised as MessagePack.
+          this._store.merge_snapshot(data);
+        }
+        this._snapshotReceived = true;
+        this._proxy.notifyRemoteUpdate();
+        this._flushOfflineQueue();
+        return;
+      }
+
+      // ── UPDATE ─────────────────────────────────────────────────────────
+      if (type === 'UPDATE') {
+        if (Array.isArray(data)) {
+          for (const envBytes of data) {
+            if (envBytes instanceof Uint8Array) {
+              this._store.apply_envelope(envBytes);
+            }
+          }
+        } else if (data instanceof Uint8Array) {
+          this._store.apply_envelope(data);
+        }
+        this._proxy.notifyRemoteUpdate();
+        return;
+      }
+
+      // ── PRUNE ──────────────────────────────────────────────────────────
+      // The server has determined that all clients have advanced their clocks
+      // past `data` (a Lamport timestamp), so tombstones created at or before
+      // that timestamp can be physically erased from memory.
+      if (type === 'PRUNE' && typeof data === 'number') {
+        if (this._store.prune_tombstones) {
+          this._store.prune_tombstones(data);
+        }
+        this._proxy.notifyRemoteUpdate();
+        return;
+      }
     };
 
     // On close or error the subscription stays active so that writes made
@@ -251,9 +254,9 @@ export class WebSocketManager {
   }
 
   /**
-   * Send all pending envelopes as a single JSON-array payload, or move them
-   * to the offline queue if the socket is not currently open or the snapshot
-   * has not yet been received.
+   * Send all pending envelopes as a single MessagePack-encoded binary frame,
+   * or move them to the offline queue if the socket is not currently open or
+   * the snapshot has not yet been received.
    */
   private _flushBatch(): void {
     const envelopes = this._pendingEnvelopes.splice(0);
@@ -261,14 +264,14 @@ export class WebSocketManager {
 
     const ws = this._ws;
     if (ws.readyState === 1 /* OPEN */ && this._snapshotReceived) {
-      ws.send(JSON.stringify(envelopes));
+      ws.send(msgpackEncode(envelopes));
     } else {
       this._offlineQueue.push(...envelopes);
     }
   }
 
   /**
-   * Send all offline-queued envelopes in a single batch.
+   * Send all offline-queued envelopes in a single binary batch.
    * Called after the server's SNAPSHOT has been applied so that buffered
    * local writes finally reach peers.
    */
@@ -277,7 +280,7 @@ export class WebSocketManager {
     if (offline.length === 0) return;
     const ws = this._ws;
     if (ws.readyState === 1 /* OPEN */) {
-      ws.send(JSON.stringify(offline));
+      ws.send(msgpackEncode(offline));
     }
   }
 

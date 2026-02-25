@@ -1,0 +1,24 @@
+[package]
+name = "crdt-sync-server-rs"
+version = "0.1.0"
+edition = "2024"
+description = "Rust WebSocket relay server for crdt-sync with room routing and snapshot hydration"
+license = "MIT"
+
+[[bin]]
+name = "crdt-sync-server-rs"
+path = "src/main.rs"
+
+[dependencies]
+crdt-sync = { path = ".." }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_json = "1"

@@ -140,6 +140,16 @@ where
         }
     }
 
+    /// Physically remove entries whose token set is empty.
+    ///
+    /// An OR-Set entry with no remaining tokens is logically absent and has
+    /// been fully removed via observe-remove.  Once the server confirms that
+    /// all clients have processed the removal (via a `PRUNE` broadcast), the
+    /// backing entry can be dropped to reclaim memory.
+    pub fn prune_empties(&mut self) {
+        self.entries.retain(|_, tokens| !tokens.is_empty());
+    }
+
     /// Merge another OR-Set's state into this one (state-based / CvRDT).
     ///
     /// The merge computes the **union** of the two active-token maps: every

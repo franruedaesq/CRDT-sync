@@ -70,6 +70,12 @@ pub struct Envelope {
     pub node_id: String,
     /// The CRDT operation.
     pub op: StoreOp,
+    /// Optional Ed25519 signature (64 bytes) over the canonical payload
+    /// `(timestamp, node_id, op)` serialised with MessagePack.  When present
+    /// the server verifies this signature against the registered public key for
+    /// `node_id` before applying the envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Vec<u8>>,
 }
 
 // ── Internal type-erased CRDT wrappers ───────────────────────────────────────
@@ -79,7 +85,7 @@ type JsonORSet = ORSet<serde_json::Value>;
 type JsonRGA = RGA<serde_json::Value>;
 
 /// A multi-CRDT state synchronization engine.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StateStore {
     node_id: String,
     clock: LamportClock,
@@ -137,6 +143,7 @@ impl StateStore {
             timestamp: ts,
             node_id: self.node_id.clone(),
             op: StoreOp::Register { key: key.to_owned(), op },
+            signature: None,
         }
     }
 
@@ -171,6 +178,7 @@ impl StateStore {
             timestamp: ts,
             node_id: self.node_id.clone(),
             op: StoreOp::Set { key: key.to_owned(), op },
+            signature: None,
         }
     }
 
@@ -189,6 +197,7 @@ impl StateStore {
             timestamp: ts,
             node_id: self.node_id.clone(),
             op: StoreOp::Set { key: key.to_owned(), op },
+            signature: None,
         })
     }
 
@@ -230,6 +239,7 @@ impl StateStore {
             timestamp: ts,
             node_id: self.node_id.clone(),
             op: StoreOp::Sequence { key: key.to_owned(), op },
+            signature: None,
         }
     }
 
@@ -247,6 +257,7 @@ impl StateStore {
             timestamp: ts,
             node_id: self.node_id.clone(),
             op: StoreOp::Sequence { key: key.to_owned(), op },
+            signature: None,
         })
     }
 
@@ -277,6 +288,27 @@ impl StateStore {
     /// [`StateProxy`]: crate::proxy::StateProxy
     pub fn proxy(&mut self) -> crate::proxy::StateProxy<'_> {
         crate::proxy::StateProxy::new(self)
+    }
+
+    // ── Pruning ───────────────────────────────────────────────────────────
+
+    /// Physically remove tombstoned entries from all CRDTs in this store.
+    ///
+    /// Called after the server broadcasts a `PRUNE` message to reclaim memory
+    /// occupied by logically-deleted elements whose deletion has been observed
+    /// by every connected client (i.e. no client clock lags behind `before_ts`).
+    ///
+    /// - **RGA sequences**: nodes whose `id.clock ≤ before_ts` and `deleted ==
+    ///   true` are dropped from the internal node list.
+    /// - **OR-Sets**: entries whose token set is empty are removed (they were
+    ///   fully removed via observe-remove and are safe to forget).
+    pub fn prune_tombstones(&mut self, before_ts: u64) {
+        for seq in self.sequences.values_mut() {
+            seq.prune_tombstones(before_ts);
+        }
+        for set in self.sets.values_mut() {
+            set.prune_empties();
+        }
     }
 
     // ── Apply remote envelopes ────────────────────────────────────────────
@@ -571,5 +603,38 @@ mod tests {
         let clock_before = a.clock();
         a.merge(&b);
         assert!(a.clock() > clock_before);
+    }
+
+    #[test]
+    fn state_store_serialise_and_deserialise() {
+        let mut store = StateStore::new("n1");
+        store.set_register("x", 42_i32);
+        store.set_add("fleet", "unit-1");
+        store.seq_insert("log", 0, "entry-A");
+
+        let json = serde_json::to_string(&store).expect("serialisation should succeed");
+        let restored: StateStore = serde_json::from_str(&json).expect("deserialisation should succeed");
+
+        assert_eq!(restored.get_register::<i32>("x"), Some(42));
+        assert!(restored.set_contains("fleet", &"unit-1"));
+        assert_eq!(restored.seq_items::<String>("log"), vec!["entry-A".to_string()]);
+    }
+
+    #[test]
+    fn state_store_snapshot_merge_round_trip() {
+        let mut server = StateStore::new("server");
+        server.set_register("robot.x", 10_i32);
+        server.set_register("robot.y", 20_i32);
+
+        // Serialise server state (snapshot)
+        let snapshot = serde_json::to_string(&server).expect("serialisation should succeed");
+
+        // Client merges the snapshot
+        let mut client = StateStore::new("client");
+        let other: StateStore = serde_json::from_str(&snapshot).expect("deserialisation should succeed");
+        client.merge(&other);
+
+        assert_eq!(client.get_register::<i32>("robot.x"), Some(10));
+        assert_eq!(client.get_register::<i32>("robot.y"), Some(20));
     }
 }

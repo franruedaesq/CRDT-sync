@@ -4,10 +4,11 @@
 //! annotated with `#[wasm_bindgen]` so it can be called from JavaScript or
 //! TypeScript running in a browser or Node.js environment.
 //!
-//! All values and [`Envelope`] payloads cross the Wasm boundary as JSON
-//! strings, leveraging the `serde_json` serialisation already used throughout
-//! this crate.  This keeps the API dependency-light while remaining fully
-//! type-safe on the Rust side.
+//! All [`Envelope`] payloads cross the Wasm boundary as **MessagePack bytes**
+//! (`Uint8Array` on the JavaScript side), using `rmp-serde` for serialisation.
+//! CRDT values written from JavaScript are still supplied as JSON strings for
+//! ergonomic compatibility with the JavaScript ecosystem; only the network
+//! envelope format is binary.
 //!
 //! ## JavaScript / TypeScript usage
 //!
@@ -17,12 +18,12 @@
 //!
 //! const store = new WasmStateStore("node-1");
 //!
-//! // Write a value and obtain the envelope to broadcast.
-//! const envelope = store.set_register("robot.x", JSON.stringify(42.0));
+//! // Write a value — returns a Uint8Array (MessagePack-encoded Envelope).
+//! const envelopeBytes = store.set_register("robot.x", JSON.stringify(42.0));
 //!
-//! // On a peer node, apply the received envelope.
+//! // On a peer node, apply the received bytes.
 //! const peer = new WasmStateStore("node-2");
-//! peer.apply_envelope(envelope);
+//! peer.apply_envelope(envelopeBytes);
 //!
 //! // Read back the value.
 //! const value = JSON.parse(peer.get_register("robot.x")); // 42
@@ -34,9 +35,11 @@ use crate::state_store::{Envelope, StateStore};
 
 /// A WebAssembly-compatible wrapper around [`StateStore`].
 ///
-/// Methods accept and return JSON-encoded strings at the Wasm boundary so that
-/// [`Envelope`] payloads and CRDT values can be exchanged between Rust and
-/// JavaScript without sharing memory structures directly.
+/// Envelope methods accept and return **MessagePack bytes** (`Uint8Array` in
+/// JavaScript) so that binary frames can be sent over WebSocket without the
+/// overhead of JSON serialisation/deserialisation.  CRDT values (register
+/// contents, set elements, sequence elements) are still supplied as JSON
+/// strings for ergonomic interoperability with the JavaScript ecosystem.
 #[wasm_bindgen]
 pub struct WasmStateStore {
     inner: StateStore,
@@ -52,11 +55,11 @@ impl WasmStateStore {
         }
     }
 
-    /// Apply a remote [`Envelope`] (serialised as a JSON string) to this store.
+    /// Apply a remote [`Envelope`] (serialised as MessagePack bytes) to this store.
     ///
-    /// Throws a JavaScript error if the JSON cannot be deserialised.
-    pub fn apply_envelope(&mut self, envelope_json: &str) -> Result<(), JsValue> {
-        let env: Envelope = serde_json::from_str(envelope_json)
+    /// Throws a JavaScript error if the bytes cannot be deserialised.
+    pub fn apply_envelope(&mut self, envelope_bytes: &[u8]) -> Result<(), JsValue> {
+        let env: Envelope = rmp_serde::from_slice(envelope_bytes)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         self.inner.apply_envelope(env);
         Ok(())
@@ -66,13 +69,13 @@ impl WasmStateStore {
 
     /// Write a JSON-encoded value to the named LWW register.
     ///
-    /// Returns the resulting [`Envelope`] serialised as a JSON string, ready
-    /// to broadcast to peer nodes.
-    pub fn set_register(&mut self, key: &str, value_json: &str) -> Result<String, JsValue> {
+    /// Returns the resulting [`Envelope`] serialised as **MessagePack bytes**
+    /// (`Uint8Array`), ready to broadcast to peer nodes.
+    pub fn set_register(&mut self, key: &str, value_json: &str) -> Result<Vec<u8>, JsValue> {
         let value: serde_json::Value = serde_json::from_str(value_json)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let env = self.inner.set_register(key, value);
-        serde_json::to_string(&env).map_err(|e| JsValue::from_str(&e.to_string()))
+        rmp_serde::to_vec_named(&env).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Read the current value of a named LWW register as a JSON string.
@@ -87,28 +90,28 @@ impl WasmStateStore {
 
     /// Add a JSON-encoded element to the named OR-Set.
     ///
-    /// Returns the resulting [`Envelope`] as a JSON string.
-    pub fn set_add(&mut self, key: &str, value_json: &str) -> Result<String, JsValue> {
+    /// Returns the resulting [`Envelope`] as **MessagePack bytes**.
+    pub fn set_add(&mut self, key: &str, value_json: &str) -> Result<Vec<u8>, JsValue> {
         let value: serde_json::Value = serde_json::from_str(value_json)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let env = self.inner.set_add(key, value);
-        serde_json::to_string(&env).map_err(|e| JsValue::from_str(&e.to_string()))
+        rmp_serde::to_vec_named(&env).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Remove a JSON-encoded element from the named OR-Set.
     ///
-    /// Returns the resulting [`Envelope`] as a JSON string, or `undefined` if
-    /// the element was not present in the set.
+    /// Returns the resulting [`Envelope`] as **MessagePack bytes**, or
+    /// `undefined` if the element was not present in the set.
     ///
     /// Throws a JavaScript error if `value_json` is not valid JSON.
-    pub fn set_remove(&mut self, key: &str, value_json: &str) -> Result<Option<String>, JsValue> {
+    pub fn set_remove(&mut self, key: &str, value_json: &str) -> Result<Option<Vec<u8>>, JsValue> {
         let value: serde_json::Value = serde_json::from_str(value_json)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         match self.inner.set_remove(key, value) {
             Some(env) => {
-                let s = serde_json::to_string(&env)
+                let bytes = rmp_serde::to_vec_named(&env)
                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
-                Ok(Some(s))
+                Ok(Some(bytes))
             }
             None => Ok(None),
         }
@@ -134,27 +137,27 @@ impl WasmStateStore {
 
     /// Insert a JSON-encoded element at `index` in the named RGA sequence.
     ///
-    /// Returns the resulting [`Envelope`] as a JSON string.
+    /// Returns the resulting [`Envelope`] as **MessagePack bytes**.
     pub fn seq_insert(
         &mut self,
         key: &str,
         index: usize,
         value_json: &str,
-    ) -> Result<String, JsValue> {
+    ) -> Result<Vec<u8>, JsValue> {
         let value: serde_json::Value = serde_json::from_str(value_json)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let env = self.inner.seq_insert(key, index, value);
-        serde_json::to_string(&env).map_err(|e| JsValue::from_str(&e.to_string()))
+        rmp_serde::to_vec_named(&env).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     /// Delete the element at visible `index` in the named RGA sequence.
     ///
-    /// Returns the resulting [`Envelope`] as a JSON string, or `undefined` if
-    /// `index` is out of bounds.
-    pub fn seq_delete(&mut self, key: &str, index: usize) -> Option<String> {
+    /// Returns the resulting [`Envelope`] as **MessagePack bytes**, or
+    /// `undefined` if `index` is out of bounds.
+    pub fn seq_delete(&mut self, key: &str, index: usize) -> Option<Vec<u8>> {
         self.inner
             .seq_delete(key, index)
-            .and_then(|env| serde_json::to_string(&env).ok())
+            .and_then(|env| rmp_serde::to_vec_named(&env).ok())
     }
 
     /// Return all visible elements of the named sequence as a JSON array string.
@@ -171,6 +174,38 @@ impl WasmStateStore {
     }
 
     // ── Clock ─────────────────────────────────────────────────────────────
+
+    /// Merge a full state snapshot (serialised `StateStore` as MessagePack bytes)
+    /// into this store.
+    ///
+    /// The Rust relay server serialises the entire `StateStore` as MessagePack
+    /// and sends it in the initial `SNAPSHOT` message.  Call this method to
+    /// hydrate the local store with the server's consolidated state before
+    /// processing any new deltas.
+    ///
+    /// Throws a JavaScript error if the bytes cannot be deserialised.
+    pub fn merge_snapshot(&mut self, state_bytes: &[u8]) -> Result<(), JsValue> {
+        let other: StateStore = rmp_serde::from_slice(state_bytes)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.inner.merge(&other);
+        Ok(())
+    }
+
+    /// Physically remove tombstoned entries from all CRDTs in this store that
+    /// were deleted at or before `before_ts` (inclusive upper bound).
+    ///
+    /// Called in response to a server `PRUNE` broadcast after the server has
+    /// determined that all connected clients have advanced their clocks past
+    /// `before_ts`, meaning no client can still be "in the middle of" an
+    /// operation that references those deleted entries.  Specifically, any RGA
+    /// node with `id.clock ≤ before_ts` that has been tombstoned is physically
+    /// removed, and any OR-Set entry with an empty token set is dropped.
+    ///
+    /// `before_ts` is passed as `f64` because JavaScript's `Number` type
+    /// cannot safely represent all `u64` values.
+    pub fn prune_tombstones(&mut self, before_ts: f64) {
+        self.inner.prune_tombstones(before_ts as u64);
+    }
 
     /// Return the current Lamport clock value.
     ///
