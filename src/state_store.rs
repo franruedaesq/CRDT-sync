@@ -70,6 +70,12 @@ pub struct Envelope {
     pub node_id: String,
     /// The CRDT operation.
     pub op: StoreOp,
+    /// Optional Ed25519 signature (64 bytes) over the canonical payload
+    /// `(timestamp, node_id, op)` serialised with MessagePack.  When present
+    /// the server verifies this signature against the registered public key for
+    /// `node_id` before applying the envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Vec<u8>>,
 }
 
 // ── Internal type-erased CRDT wrappers ───────────────────────────────────────
@@ -137,6 +143,7 @@ impl StateStore {
             timestamp: ts,
             node_id: self.node_id.clone(),
             op: StoreOp::Register { key: key.to_owned(), op },
+            signature: None,
         }
     }
 
@@ -171,6 +178,7 @@ impl StateStore {
             timestamp: ts,
             node_id: self.node_id.clone(),
             op: StoreOp::Set { key: key.to_owned(), op },
+            signature: None,
         }
     }
 
@@ -189,6 +197,7 @@ impl StateStore {
             timestamp: ts,
             node_id: self.node_id.clone(),
             op: StoreOp::Set { key: key.to_owned(), op },
+            signature: None,
         })
     }
 
@@ -230,6 +239,7 @@ impl StateStore {
             timestamp: ts,
             node_id: self.node_id.clone(),
             op: StoreOp::Sequence { key: key.to_owned(), op },
+            signature: None,
         }
     }
 
@@ -247,6 +257,7 @@ impl StateStore {
             timestamp: ts,
             node_id: self.node_id.clone(),
             op: StoreOp::Sequence { key: key.to_owned(), op },
+            signature: None,
         })
     }
 
