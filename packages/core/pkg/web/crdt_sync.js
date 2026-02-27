@@ -3,9 +3,11 @@
 /**
  * A WebAssembly-compatible wrapper around [`StateStore`].
  *
- * Methods accept and return JSON-encoded strings at the Wasm boundary so that
- * [`Envelope`] payloads and CRDT values can be exchanged between Rust and
- * JavaScript without sharing memory structures directly.
+ * Envelope methods accept and return **MessagePack bytes** (`Uint8Array` in
+ * JavaScript) so that binary frames can be sent over WebSocket without the
+ * overhead of JSON serialisation/deserialisation.  CRDT values (register
+ * contents, set elements, sequence elements) are still supplied as JSON
+ * strings for ergonomic interoperability with the JavaScript ecosystem.
  */
 export class WasmStateStore {
     __destroy_into_raw() {
@@ -19,13 +21,13 @@ export class WasmStateStore {
         wasm.__wbg_wasmstatestore_free(ptr, 0);
     }
     /**
-     * Apply a remote [`Envelope`] (serialised as a JSON string) to this store.
+     * Apply a remote [`Envelope`] (serialised as MessagePack bytes) to this store.
      *
-     * Throws a JavaScript error if the JSON cannot be deserialised.
-     * @param {string} envelope_json
+     * Throws a JavaScript error if the bytes cannot be deserialised.
+     * @param {Uint8Array} envelope_bytes
      */
-    apply_envelope(envelope_json) {
-        const ptr0 = passStringToWasm0(envelope_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    apply_envelope(envelope_bytes) {
+        const ptr0 = passArray8ToWasm0(envelope_bytes, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.wasmstatestore_apply_envelope(this.__wbg_ptr, ptr0, len0);
         if (ret[1]) {
@@ -65,6 +67,26 @@ export class WasmStateStore {
         return v2;
     }
     /**
+     * Merge a full state snapshot (serialised `StateStore` as MessagePack bytes)
+     * into this store.
+     *
+     * The Rust relay server serialises the entire `StateStore` as MessagePack
+     * and sends it in the initial `SNAPSHOT` message.  Call this method to
+     * hydrate the local store with the server's consolidated state before
+     * processing any new deltas.
+     *
+     * Throws a JavaScript error if the bytes cannot be deserialised.
+     * @param {Uint8Array} state_bytes
+     */
+    merge_snapshot(state_bytes) {
+        const ptr0 = passArray8ToWasm0(state_bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmstatestore_merge_snapshot(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * Create a new `WasmStateStore` for the given node identifier.
      * @param {string} node_id
      */
@@ -77,13 +99,31 @@ export class WasmStateStore {
         return this;
     }
     /**
+     * Physically remove tombstoned entries from all CRDTs in this store that
+     * were deleted at or before `before_ts` (inclusive upper bound).
+     *
+     * Called in response to a server `PRUNE` broadcast after the server has
+     * determined that all connected clients have advanced their clocks past
+     * `before_ts`, meaning no client can still be "in the middle of" an
+     * operation that references those deleted entries.  Specifically, any RGA
+     * node with `id.clock ≤ before_ts` that has been tombstoned is physically
+     * removed, and any OR-Set entry with an empty token set is dropped.
+     *
+     * `before_ts` is passed as `f64` because JavaScript's `Number` type
+     * cannot safely represent all `u64` values.
+     * @param {number} before_ts
+     */
+    prune_tombstones(before_ts) {
+        wasm.wasmstatestore_prune_tombstones(this.__wbg_ptr, before_ts);
+    }
+    /**
      * Delete the element at visible `index` in the named RGA sequence.
      *
-     * Returns the resulting [`Envelope`] as a JSON string, or `undefined` if
-     * `index` is out of bounds.
+     * Returns the resulting [`Envelope`] as **MessagePack bytes**, or
+     * `undefined` if `index` is out of bounds.
      * @param {string} key
      * @param {number} index
-     * @returns {string | undefined}
+     * @returns {Uint8Array | undefined}
      */
     seq_delete(key, index) {
         const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -91,7 +131,7 @@ export class WasmStateStore {
         const ret = wasm.wasmstatestore_seq_delete(this.__wbg_ptr, ptr0, len0, index);
         let v2;
         if (ret[0] !== 0) {
-            v2 = getStringFromWasm0(ret[0], ret[1]).slice();
+            v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
             wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         }
         return v2;
@@ -99,33 +139,24 @@ export class WasmStateStore {
     /**
      * Insert a JSON-encoded element at `index` in the named RGA sequence.
      *
-     * Returns the resulting [`Envelope`] as a JSON string.
+     * Returns the resulting [`Envelope`] as **MessagePack bytes**.
      * @param {string} key
      * @param {number} index
      * @param {string} value_json
-     * @returns {string}
+     * @returns {Uint8Array}
      */
     seq_insert(key, index, value_json) {
-        let deferred4_0;
-        let deferred4_1;
-        try {
-            const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(value_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.wasmstatestore_seq_insert(this.__wbg_ptr, ptr0, len0, index, ptr1, len1);
-            var ptr3 = ret[0];
-            var len3 = ret[1];
-            if (ret[3]) {
-                ptr3 = 0; len3 = 0;
-                throw takeFromExternrefTable0(ret[2]);
-            }
-            deferred4_0 = ptr3;
-            deferred4_1 = len3;
-            return getStringFromWasm0(ptr3, len3);
-        } finally {
-            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+        const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(value_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmstatestore_seq_insert(this.__wbg_ptr, ptr0, len0, index, ptr1, len1);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
         }
+        var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v3;
     }
     /**
      * Return all visible elements of the named sequence as a JSON array string.
@@ -168,32 +199,23 @@ export class WasmStateStore {
     /**
      * Add a JSON-encoded element to the named OR-Set.
      *
-     * Returns the resulting [`Envelope`] as a JSON string.
+     * Returns the resulting [`Envelope`] as **MessagePack bytes**.
      * @param {string} key
      * @param {string} value_json
-     * @returns {string}
+     * @returns {Uint8Array}
      */
     set_add(key, value_json) {
-        let deferred4_0;
-        let deferred4_1;
-        try {
-            const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(value_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.wasmstatestore_set_add(this.__wbg_ptr, ptr0, len0, ptr1, len1);
-            var ptr3 = ret[0];
-            var len3 = ret[1];
-            if (ret[3]) {
-                ptr3 = 0; len3 = 0;
-                throw takeFromExternrefTable0(ret[2]);
-            }
-            deferred4_0 = ptr3;
-            deferred4_1 = len3;
-            return getStringFromWasm0(ptr3, len3);
-        } finally {
-            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+        const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(value_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmstatestore_set_add(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
         }
+        var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v3;
     }
     /**
      * Returns `true` if the named OR-Set contains the JSON-encoded `value`.
@@ -239,44 +261,35 @@ export class WasmStateStore {
     /**
      * Write a JSON-encoded value to the named LWW register.
      *
-     * Returns the resulting [`Envelope`] serialised as a JSON string, ready
-     * to broadcast to peer nodes.
+     * Returns the resulting [`Envelope`] serialised as **MessagePack bytes**
+     * (`Uint8Array`), ready to broadcast to peer nodes.
      * @param {string} key
      * @param {string} value_json
-     * @returns {string}
+     * @returns {Uint8Array}
      */
     set_register(key, value_json) {
-        let deferred4_0;
-        let deferred4_1;
-        try {
-            const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(value_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-            const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.wasmstatestore_set_register(this.__wbg_ptr, ptr0, len0, ptr1, len1);
-            var ptr3 = ret[0];
-            var len3 = ret[1];
-            if (ret[3]) {
-                ptr3 = 0; len3 = 0;
-                throw takeFromExternrefTable0(ret[2]);
-            }
-            deferred4_0 = ptr3;
-            deferred4_1 = len3;
-            return getStringFromWasm0(ptr3, len3);
-        } finally {
-            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+        const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(value_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmstatestore_set_register(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
         }
+        var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v3;
     }
     /**
      * Remove a JSON-encoded element from the named OR-Set.
      *
-     * Returns the resulting [`Envelope`] as a JSON string, or `undefined` if
-     * the element was not present in the set.
+     * Returns the resulting [`Envelope`] as **MessagePack bytes**, or
+     * `undefined` if the element was not present in the set.
      *
      * Throws a JavaScript error if `value_json` is not valid JSON.
      * @param {string} key
      * @param {string} value_json
-     * @returns {string | undefined}
+     * @returns {Uint8Array | undefined}
      */
     set_remove(key, value_json) {
         const ptr0 = passStringToWasm0(key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -289,7 +302,7 @@ export class WasmStateStore {
         }
         let v3;
         if (ret[0] !== 0) {
-            v3 = getStringFromWasm0(ret[0], ret[1]).slice();
+            v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
             wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         }
         return v3;
@@ -362,6 +375,13 @@ function handleError(f, args) {
         const idx = addToExternrefTable0(e);
         wasm.__wbindgen_exn_store(idx);
     }
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {

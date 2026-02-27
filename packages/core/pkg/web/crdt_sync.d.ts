@@ -4,19 +4,21 @@
 /**
  * A WebAssembly-compatible wrapper around [`StateStore`].
  *
- * Methods accept and return JSON-encoded strings at the Wasm boundary so that
- * [`Envelope`] payloads and CRDT values can be exchanged between Rust and
- * JavaScript without sharing memory structures directly.
+ * Envelope methods accept and return **MessagePack bytes** (`Uint8Array` in
+ * JavaScript) so that binary frames can be sent over WebSocket without the
+ * overhead of JSON serialisation/deserialisation.  CRDT values (register
+ * contents, set elements, sequence elements) are still supplied as JSON
+ * strings for ergonomic interoperability with the JavaScript ecosystem.
  */
 export class WasmStateStore {
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * Apply a remote [`Envelope`] (serialised as a JSON string) to this store.
+     * Apply a remote [`Envelope`] (serialised as MessagePack bytes) to this store.
      *
-     * Throws a JavaScript error if the JSON cannot be deserialised.
+     * Throws a JavaScript error if the bytes cannot be deserialised.
      */
-    apply_envelope(envelope_json: string): void;
+    apply_envelope(envelope_bytes: Uint8Array): void;
     /**
      * Return the current Lamport clock value.
      *
@@ -34,22 +36,49 @@ export class WasmStateStore {
      */
     get_register(key: string): string | undefined;
     /**
+     * Merge a full state snapshot (serialised `StateStore` as MessagePack bytes)
+     * into this store.
+     *
+     * The Rust relay server serialises the entire `StateStore` as MessagePack
+     * and sends it in the initial `SNAPSHOT` message.  Call this method to
+     * hydrate the local store with the server's consolidated state before
+     * processing any new deltas.
+     *
+     * Throws a JavaScript error if the bytes cannot be deserialised.
+     */
+    merge_snapshot(state_bytes: Uint8Array): void;
+    /**
      * Create a new `WasmStateStore` for the given node identifier.
      */
     constructor(node_id: string);
     /**
+     * Physically remove tombstoned entries from all CRDTs in this store that
+     * were deleted at or before `before_ts` (inclusive upper bound).
+     *
+     * Called in response to a server `PRUNE` broadcast after the server has
+     * determined that all connected clients have advanced their clocks past
+     * `before_ts`, meaning no client can still be "in the middle of" an
+     * operation that references those deleted entries.  Specifically, any RGA
+     * node with `id.clock ≤ before_ts` that has been tombstoned is physically
+     * removed, and any OR-Set entry with an empty token set is dropped.
+     *
+     * `before_ts` is passed as `f64` because JavaScript's `Number` type
+     * cannot safely represent all `u64` values.
+     */
+    prune_tombstones(before_ts: number): void;
+    /**
      * Delete the element at visible `index` in the named RGA sequence.
      *
-     * Returns the resulting [`Envelope`] as a JSON string, or `undefined` if
-     * `index` is out of bounds.
+     * Returns the resulting [`Envelope`] as **MessagePack bytes**, or
+     * `undefined` if `index` is out of bounds.
      */
-    seq_delete(key: string, index: number): string | undefined;
+    seq_delete(key: string, index: number): Uint8Array | undefined;
     /**
      * Insert a JSON-encoded element at `index` in the named RGA sequence.
      *
-     * Returns the resulting [`Envelope`] as a JSON string.
+     * Returns the resulting [`Envelope`] as **MessagePack bytes**.
      */
-    seq_insert(key: string, index: number, value_json: string): string;
+    seq_insert(key: string, index: number, value_json: string): Uint8Array;
     /**
      * Return all visible elements of the named sequence as a JSON array string.
      *
@@ -63,9 +92,9 @@ export class WasmStateStore {
     /**
      * Add a JSON-encoded element to the named OR-Set.
      *
-     * Returns the resulting [`Envelope`] as a JSON string.
+     * Returns the resulting [`Envelope`] as **MessagePack bytes**.
      */
-    set_add(key: string, value_json: string): string;
+    set_add(key: string, value_json: string): Uint8Array;
     /**
      * Returns `true` if the named OR-Set contains the JSON-encoded `value`.
      */
@@ -79,19 +108,19 @@ export class WasmStateStore {
     /**
      * Write a JSON-encoded value to the named LWW register.
      *
-     * Returns the resulting [`Envelope`] serialised as a JSON string, ready
-     * to broadcast to peer nodes.
+     * Returns the resulting [`Envelope`] serialised as **MessagePack bytes**
+     * (`Uint8Array`), ready to broadcast to peer nodes.
      */
-    set_register(key: string, value_json: string): string;
+    set_register(key: string, value_json: string): Uint8Array;
     /**
      * Remove a JSON-encoded element from the named OR-Set.
      *
-     * Returns the resulting [`Envelope`] as a JSON string, or `undefined` if
-     * the element was not present in the set.
+     * Returns the resulting [`Envelope`] as **MessagePack bytes**, or
+     * `undefined` if the element was not present in the set.
      *
      * Throws a JavaScript error if `value_json` is not valid JSON.
      */
-    set_remove(key: string, value_json: string): string | undefined;
+    set_remove(key: string, value_json: string): Uint8Array | undefined;
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -102,7 +131,9 @@ export interface InitOutput {
     readonly wasmstatestore_apply_envelope: (a: number, b: number, c: number) => [number, number];
     readonly wasmstatestore_clock: (a: number) => number;
     readonly wasmstatestore_get_register: (a: number, b: number, c: number) => [number, number];
+    readonly wasmstatestore_merge_snapshot: (a: number, b: number, c: number) => [number, number];
     readonly wasmstatestore_new: (a: number, b: number) => number;
+    readonly wasmstatestore_prune_tombstones: (a: number, b: number) => void;
     readonly wasmstatestore_seq_delete: (a: number, b: number, c: number, d: number) => [number, number];
     readonly wasmstatestore_seq_insert: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly wasmstatestore_seq_items: (a: number, b: number, c: number) => [number, number, number, number];
@@ -116,8 +147,8 @@ export interface InitOutput {
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __externref_table_dealloc: (a: number) => void;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_start: () => void;
 }

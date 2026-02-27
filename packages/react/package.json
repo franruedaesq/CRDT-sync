@@ -1,6 +1,6 @@
 {
     "name": "@crdt-sync/react",
-    "version": "0.3.4",
+    "version": "0.3.5",
     "description": "React hook adapter for crdt-sync",
     "main": "dist/index.js",
     "module": "dist/index.mjs",
@@ -24,7 +24,7 @@
         "react-dom": ">=16.8"
     },
     "dependencies": {
-        "@crdt-sync/core": "^0.3.4"
+        "@crdt-sync/core": "^0.3.5"
     },
     "devDependencies": {
         "@testing-library/jest-dom": "^6.9.1",

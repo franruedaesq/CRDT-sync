@@ -180,7 +180,7 @@ export class CrdtStateProxy<T extends Record<string, unknown> = Record<string, u
       set: (_target, prop, value: unknown) => {
         if (typeof prop === 'symbol') return false;
         const key = String(prop);
-        let envelope = "";
+        let envelope: Uint8Array = new Uint8Array();
         try {
           envelope = this._store.set_register(key, JSON.stringify(value));
         } catch (e) {
